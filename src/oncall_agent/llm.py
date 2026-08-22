@@ -81,15 +81,37 @@ class LLMClient:
         self, prompt: str, schema: dict[str, Any], *, deep: bool = False, system: str | None = None
     ) -> dict[str, Any]:
         """Structured output. The schema is the constraint, not a prompt instruction."""
-        model = self.settings.gemini_model_deep if deep else self.settings.gemini_model_fast
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=schema,
             system_instruction=system,
         )
-        response = self._call(model, prompt, config)
+        model, response = self._call_tiered(prompt, config, deep=deep)
 
         try:
-            return json.loads(response.text)
+            payload = json.loads(response.text)
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMUnavailable(f"Gemini returned unparseable JSON: {exc}") from exc
+
+        payload["_model"] = model
+        return payload
+
+    def _call_tiered(self, prompt: str, config, *, deep: bool):
+        """Try the intended tier, then fall back a tier if it is overloaded.
+
+        A weaker model that answers beats a stronger one that is unreachable — provided
+        the reader is told which one replied, which is why the model name travels with
+        the result rather than being logged and forgotten.
+        """
+        if not deep:
+            model = self.settings.gemini_model_fast
+            return model, self._call(model, prompt, config)
+
+        try:
+            model = self.settings.gemini_model_deep
+            return model, self._call(model, prompt, config)
+        except LLMUnavailable as exc:
+            if "overloaded" not in str(exc):
+                raise
+            model = self.settings.gemini_model_fast
+            return model, self._call(model, prompt, config)

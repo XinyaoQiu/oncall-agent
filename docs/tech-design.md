@@ -525,6 +525,17 @@ During an incident nobody stops to ask whether half the analysis is silently abs
 response that looks complete and isn't is worse than a visible failure, and the on-call
 context is exactly where that gap does the most damage.
 
+**Overload is retried, then dropped a tier.** A 503 from a busy model is transient, and
+giving up on the first one makes the agent unavailable exactly when incidents cluster. So
+transient failures retry with backoff, bounded to roughly twenty seconds — during an
+incident a late answer is worth little, and failing clearly beats keeping someone waiting.
+
+If the deep tier is still overloaded after that, the request drops to the fast tier rather
+than failing. **The reply says which model answered.** This is not a contradiction of the
+rule above: the distinction is between an answer that is *weaker and labelled* and an
+answer that is *incomplete and unlabelled*. A shallower analysis the reader can discount
+is useful; half an analysis that renders like a whole one is not.
+
 **Failure reporting is two-layered:**
 
 ```

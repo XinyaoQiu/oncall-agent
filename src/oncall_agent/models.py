@@ -142,6 +142,8 @@ class Diagnosis(BaseModel):
     evidence_cited: list[str] = Field(default_factory=list)
     suggested_next_steps: list[str] = Field(default_factory=list)
     related_incidents: list[str] = Field(default_factory=list)
+    model: str | None = None
+    degraded_tier: bool = False
 
 
 class TriageResult(BaseModel):

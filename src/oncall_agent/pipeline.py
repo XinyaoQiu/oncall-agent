@@ -97,6 +97,13 @@ def format_reply(result: TriageResult) -> str:
         if d.related_incidents:
             lines += ["", "*Related history*"] + [f"• {r}" for r in d.related_incidents]
 
+    if d and d.degraded_tier:
+        lines.insert(
+            1,
+            f":warning: _Answered by {d.model} — the usual model was overloaded. "
+            "Analysis may be shallower than normal._",
+        )
+
     if any(m.source == "sample" for m in result.metrics):
         # The reader cannot tell fixtures from live data by looking at the numbers, so
         # say it where they will see it rather than trusting the model to mention it.

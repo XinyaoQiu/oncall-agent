@@ -157,7 +157,10 @@ def diagnose(
     )
     result = llm.generate_json(prompt, _DIAGNOSIS_SCHEMA, deep=True, system=SYSTEM_PROMPT)
 
+    model = result.get("_model")
     return Diagnosis(
+        model=model,
+        degraded_tier=bool(model and model != llm.settings.gemini_model_deep),
         summary=result["summary"],
         likely_cause=result["likely_cause"],
         confidence=Confidence(result.get("confidence", "low")),

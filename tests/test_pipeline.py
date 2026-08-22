@@ -277,3 +277,44 @@ class TestQuestionRouting:
 
         identity = identify(FIVEXX_ALERT, llm=None)
         assert "engineer asked" not in build_prompt(identity, None, None, [], [], [], [])
+
+
+class TestTierFallback:
+    """When the deep tier is overloaded, a weaker answer beats no answer — but the
+    reader must be told, since the fallback changes analysis quality."""
+
+    def test_reply_flags_a_degraded_tier(self):
+        from oncall_agent.models import Confidence, Diagnosis, TriageResult
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            diagnosis=Diagnosis(
+                summary="s", likely_cause="c", confidence=Confidence.LOW,
+                victim_or_cause="v", model="gemini-flash-latest", degraded_tier=True,
+            ),
+        )
+        reply = format_reply(result)
+        assert "gemini-flash-latest" in reply
+        assert "overloaded" in reply
+
+    def test_normal_tier_is_not_flagged(self):
+        from oncall_agent.models import Confidence, Diagnosis, TriageResult
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            diagnosis=Diagnosis(
+                summary="s", likely_cause="c", confidence=Confidence.LOW,
+                victim_or_cause="v", model="gemini-pro-latest", degraded_tier=False,
+            ),
+        )
+        assert "overloaded" not in format_reply(result)
+
+    def test_transient_errors_are_recognised(self):
+        from oncall_agent.llm import _is_transient
+
+        assert _is_transient(Exception("503 UNAVAILABLE"))
+        assert _is_transient(Exception("429 RESOURCE_EXHAUSTED"))
+        assert not _is_transient(Exception("404 NOT_FOUND"))
+        assert not _is_transient(Exception("401 UNAUTHENTICATED"))
