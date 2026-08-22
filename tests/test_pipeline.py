@@ -94,12 +94,55 @@ class TestEmptyResults:
         result = MetricResult(query="up", error="connection refused")
         assert "failed" in result.summarize()
 
-    def test_populated_result_summarizes_peak(self):
+    def test_populated_result_shows_range_and_latest(self):
         result = MetricResult(
             query="up",
             series=[MetricSeries(labels={"app": "x"}, points=[(0, 1.0), (1, 5.0)])],
         )
-        assert "peak=5" in result.summarize()
+        summary = result.summarize()
+        assert "min=1" in summary and "max=5" in summary and "latest=5" in summary
+
+    def test_flat_series_reads_as_steady(self):
+        result = MetricResult(
+            query="up",
+            series=[MetricSeries(labels={"app": "x"}, points=[(0, 3.0), (1, 3.0)])],
+        )
+        assert "steady at 3" in result.summarize()
+
+
+class TestTimestampMetrics:
+    """A pod start time is a moment, not a magnitude.
+
+    Rendering it as a raw epoch number let the model read any timestamp as "recent"
+    and cite it as evidence of a fresh deploy.
+    """
+
+    def test_start_time_renders_as_age(self):
+        now = 1_787_000_000.0
+        result = MetricResult(
+            query='kube_pod_start_time{pod=~"server-feed-.*"}',
+            series=[MetricSeries(labels={"pod": "server-feed-abc"}, points=[(now, now - 720)])],
+        )
+        summary = result.summarize(now=now)
+        assert "12 minutes ago" in summary
+        assert "1.787e+09" not in summary
+
+    def test_old_start_time_is_not_described_as_recent(self):
+        now = 1_787_000_000.0
+        result = MetricResult(
+            query='kube_pod_start_time{pod=~"server-feed-.*"}',
+            series=[
+                MetricSeries(labels={"pod": "server-feed-abc"}, points=[(now, now - 86400 * 3)])
+            ],
+        )
+        assert "3.0 days ago" in result.summarize(now=now)
+
+    def test_value_metrics_are_not_treated_as_timestamps(self):
+        result = MetricResult(
+            query="kube_deployment_status_replicas{deployment='x'}",
+            series=[MetricSeries(labels={"deployment": "x"}, points=[(0, 4.0), (1, 12.0)])],
+        )
+        assert "ago" not in result.summarize()
 
 
 class TestSampleData:
@@ -116,3 +159,55 @@ class TestSampleData:
         for name in ("news-list-for-channel-p99", "large-scale-5xx"):
             assert get_alert(name) is not None
             assert sample_metrics.rule_for(name) is not None
+
+
+class TestSampleDataDisclosure:
+    """Fixtures must never be presentable as live measurements.
+
+    A reader cannot tell sample numbers from real ones by looking at them, so the
+    warning goes both into the prompt and into the visible reply.
+    """
+
+    def _sample_result(self):
+        from oncall_agent.models import TriageResult
+
+        grafana = GrafanaClient(Settings(use_sample_metrics=True))
+        identity = AlertIdentity(alert_name="news-list-for-channel-p99")
+        rule = evidence.fetch_rule(grafana, identity)
+        deployment = evidence.resolve_service(identity, rule)
+        metrics = evidence.gather(grafana, identity, rule, deployment)
+        return TriageResult(identity=identity, rule=rule, metrics=metrics), deployment
+
+    def test_prompt_marks_sample_data(self):
+        from oncall_agent.analysis.diagnose import build_prompt
+
+        result, deployment = self._sample_result()
+        prompt = build_prompt(result.identity, result.rule, deployment, result.metrics, [], [], [])
+
+        assert "SAMPLE DATA" in prompt
+        assert "cap your confidence at low" in prompt
+
+    def test_prompt_includes_current_time(self):
+        from oncall_agent.analysis.diagnose import build_prompt
+
+        result, deployment = self._sample_result()
+        prompt = build_prompt(result.identity, result.rule, deployment, result.metrics, [], [], [])
+
+        # Without a reference point the model cannot tell whether a timestamp is recent.
+        assert "# Now" in prompt
+
+    def test_reply_carries_the_warning(self):
+        from oncall_agent.pipeline import format_reply
+
+        result, _ = self._sample_result()
+        assert "Sample metrics" in format_reply(result)
+
+    def test_real_metrics_carry_no_warning(self):
+        from oncall_agent.models import TriageResult
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            metrics=[MetricResult(query="up", source="grafana", series=[])],
+        )
+        assert "Sample metrics" not in format_reply(result)

@@ -96,6 +96,15 @@ def format_reply(result: TriageResult) -> str:
         if d.related_incidents:
             lines += ["", "*Related history*"] + [f"• {r}" for r in d.related_incidents]
 
+    if any(m.source == "sample" for m in result.metrics):
+        # The reader cannot tell fixtures from live data by looking at the numbers, so
+        # say it where they will see it rather than trusting the model to mention it.
+        lines.insert(
+            1,
+            ":test_tube: *Sample metrics — no metrics backend configured.* "
+            "Nothing below reflects the live system.",
+        )
+
     if result.metrics:
         queried = [m for m in result.metrics if not m.error]
         lines += ["", f"_Queried {len(queried)} metric series"]

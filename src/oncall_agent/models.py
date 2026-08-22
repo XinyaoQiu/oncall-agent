@@ -1,5 +1,6 @@
 """Data models for the triage pipeline."""
 
+import time
 from datetime import datetime
 from enum import Enum
 
@@ -53,6 +54,18 @@ class MetricSeries(BaseModel):
         return max((v for _, v in self.points), default=None)
 
 
+def _relative(seconds: float) -> str:
+    """Render an age the way a person would say it."""
+    seconds = abs(seconds)
+    if seconds < 90:
+        return f"{seconds:.0f}s ago"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} minutes ago"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f} hours ago"
+    return f"{seconds / 86400:.1f} days ago"
+
+
 class MetricResult(BaseModel):
     """A metric query result, always carrying the query that produced it."""
 
@@ -65,7 +78,16 @@ class MetricResult(BaseModel):
     def is_empty(self) -> bool:
         return not self.series
 
-    def summarize(self, limit: int = 5) -> str:
+    @property
+    def is_timestamp_metric(self) -> bool:
+        """Metrics whose *value* is a point in time, not a magnitude.
+
+        A peak over these is meaningless, and a raw epoch number invites the reader to
+        assume it is recent.
+        """
+        return "_time" in self.query or "_timestamp" in self.query
+
+    def summarize(self, limit: int = 5, *, now: float | None = None) -> str:
         """Compact text form for the prompt."""
         if self.error:
             return f"query failed: {self.error}"
@@ -73,14 +95,29 @@ class MetricResult(BaseModel):
             # An empty result is not evidence of health.
             return "no data returned (this is not the same as 'healthy')"
 
+        reference = now if now is not None else time.time()
         lines = []
         for s in self.series[:limit]:
             label_str = ", ".join(f"{k}={v}" for k, v in s.labels.items())
-            peak = s.peak()
-            lines.append(f"  {{{label_str}}} peak={peak:.4g}" if peak else f"  {{{label_str}}}")
+            lines.append(f"  {{{label_str}}} {self._describe(s, reference)}")
+
         if len(self.series) > limit:
             lines.append(f"  ... and {len(self.series) - limit} more series")
         return "\n".join(lines)
+
+    def _describe(self, series: MetricSeries, now: float) -> str:
+        values = [v for _, v in series.points]
+        if not values:
+            return "(no points)"
+
+        if self.is_timestamp_metric:
+            # The value IS a time. Say how long ago, not how large.
+            return _relative(now - values[-1])
+
+        low, high, last = min(values), max(values), values[-1]
+        if high == low:
+            return f"steady at {high:.4g}"
+        return f"min={low:.4g} max={high:.4g} latest={last:.4g}"
 
 
 class KnowledgeHit(BaseModel):

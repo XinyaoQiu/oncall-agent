@@ -1,5 +1,7 @@
 """Diagnosis: the model's judgment over the gathered evidence."""
 
+from datetime import datetime
+
 from ..config import Deployment
 from ..llm import LLMClient
 from ..models import (
@@ -20,6 +22,12 @@ Your job is to interpret gathered evidence, not to sound certain. Rules:
   real problem — memcache errors during pod churn, 502s during an ingress reload, a
   wedged pod amplified by load-balancer circuit breaking.
 - An empty metric result means no data, not a healthy system. Say so.
+- A runbook saying "this alert is usually X" is not evidence that this instance is X. It
+  tells you what to check, not what happened. Cite it as a hypothesis to test, never as
+  support for a conclusion.
+- Reserve high confidence for cases where a specific observation ties the cause to this
+  firing — a deploy inside the window, a correlated restart, a matching error signature.
+  Two plausible-sounding bullets are not high confidence.
 - If evidence is thin, set confidence low. Low confidence with a clear next step is more
   useful than a confident guess.
 - Prefer the boring explanation. Deploy cold starts, single runaway clients, and
@@ -53,7 +61,12 @@ def build_prompt(
     benign: list[str],
     priors: list[str],
 ) -> str:
-    sections = [f"# Alert\n{identity.alert_name} (identified by {identity.identified_by})"]
+    now = datetime.now()
+    sections = [
+        f"# Now\n{now.isoformat(timespec='seconds')} "
+        "(use this to judge whether anything below is recent)",
+        f"\n# Alert\n{identity.alert_name} (identified by {identity.identified_by})",
+    ]
 
     if identity.labels:
         sections.append(
@@ -75,7 +88,16 @@ def build_prompt(
         )
 
     if metrics:
-        sections.append("\n# Metrics")
+        if any(m.source == "sample" for m in metrics):
+            sections.append(
+                "\n# Metrics — SAMPLE DATA, NOT THIS SYSTEM\n"
+                "No metrics backend is configured, so these numbers are fixtures. They "
+                "describe nothing about the live system. Do not cite them as evidence, "
+                "and cap your confidence at low."
+            )
+        else:
+            sections.append("\n# Metrics")
+
         for m in metrics:
             sections.append(f"query: {m.query}\n{m.summarize()}")
 
