@@ -21,6 +21,7 @@ def analyze(
     thread: Path = typer.Option(None, help="JSON file with thread messages"),
     sample: bool = typer.Option(False, "--sample", help="Use sample metrics instead of Grafana"),
     raw: bool = typer.Option(False, "--raw", help="Print the full result as JSON"),
+    ask: str = typer.Option(None, "--ask", help="What to focus the analysis on"),
 ):
     """Analyze an alert and print the reply."""
     settings = Settings.from_env()
@@ -34,7 +35,7 @@ def analyze(
         messages = [ThreadMessage(**m) for m in json.loads(thread.read_text())]
 
     try:
-        result = triage(text, messages, settings=settings)
+        result = triage(text, messages, question=ask, settings=settings)
     except LLMUnavailable as exc:
         typer.secho(f"Cannot analyze: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)

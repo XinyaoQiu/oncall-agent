@@ -22,6 +22,7 @@ def triage(
     text: str,
     messages: list[ThreadMessage] | None = None,
     *,
+    question: str | None = None,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
 ) -> TriageResult:
@@ -63,7 +64,7 @@ def triage(
         thread_priors=priors,
     )
     result.diagnosis = diagnose.diagnose(
-        llm, identity, rule, deployment, metrics, hits, benign, priors
+        llm, identity, rule, deployment, metrics, hits, benign, priors, question
     )
     return result
 

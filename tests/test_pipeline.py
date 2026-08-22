@@ -184,8 +184,10 @@ class TestSampleDataDisclosure:
         result, deployment = self._sample_result()
         prompt = build_prompt(result.identity, result.rule, deployment, result.metrics, [], [], [])
 
-        assert "SAMPLE DATA" in prompt
-        assert "cap your confidence at low" in prompt
+        assert "UNAVAILABLE" in prompt
+        assert "static fixtures" in prompt
+        # Phrased as a fact about the data, not an instruction the model can quote back.
+        assert "Do not cite" not in prompt
 
     def test_prompt_includes_current_time(self):
         from oncall_agent.analysis.diagnose import build_prompt
@@ -211,3 +213,65 @@ class TestSampleDataDisclosure:
             metrics=[MetricResult(query="up", source="grafana", series=[])],
         )
         assert "Sample metrics" not in format_reply(result)
+
+
+class TestImpactQuantification:
+    """Step 7 of the playbook: how much is actually affected.
+
+    Counts come from the ingress layer because application logs are sampled ~1/8 —
+    counting there understates impact by nearly an order of magnitude, and the wrong
+    number looks authoritative once it reaches an incident review.
+    """
+
+    def test_impact_queries_target_the_ingress_layer(self, sample_grafana):
+        identity = identify(FIVEXX_ALERT, llm=None)
+        results = evidence.quantify_impact(sample_grafana, identity, None)
+
+        assert results, "a host-scoped alert should produce impact queries"
+        assert all("nginx_ingress_controller_requests" in r.query for r in results)
+        assert not any("server_logs" in r.query for r in results)
+
+    def test_impact_covers_errors_and_total(self, sample_grafana):
+        identity = identify(FIVEXX_ALERT, llm=None)
+        queries = [r.query for r in evidence.quantify_impact(sample_grafana, identity, None)]
+
+        # Both are needed: an error count alone cannot express a rate.
+        assert any('status=~"5.."' in q for q in queries)
+        assert any('status' not in q for q in queries)
+
+    def test_impact_is_scoped_to_the_alerting_host(self, sample_grafana):
+        identity = identify(FIVEXX_ALERT, llm=None)
+        results = evidence.quantify_impact(sample_grafana, identity, None)
+
+        hosts = {s.labels.get("host") for r in results for s in r.series}
+        assert hosts == {"www.newsbreak.com"}
+
+    def test_no_host_means_no_impact_query(self, sample_grafana):
+        identity = AlertIdentity(alert_name="feed-channel-empty", labels={})
+        assert evidence.quantify_impact(sample_grafana, identity, None) == []
+
+    def test_gather_includes_impact(self, sample_grafana):
+        identity = identify(FIVEXX_ALERT, llm=None)
+        rule = evidence.fetch_rule(sample_grafana, identity)
+        deployment = evidence.resolve_service(identity, rule)
+        results = evidence.gather(sample_grafana, identity, rule, deployment)
+
+        assert any("nginx_ingress_controller_requests{host" in r.query for r in results)
+
+
+class TestQuestionRouting:
+    def test_question_reaches_the_prompt(self, sample_grafana):
+        from oncall_agent.analysis.diagnose import build_prompt
+
+        identity = identify(FIVEXX_ALERT, llm=None)
+        prompt = build_prompt(
+            identity, None, None, [], [], [], [], question="find production influence"
+        )
+        assert "find production influence" in prompt
+        assert "Answer this first" in prompt
+
+    def test_prompt_omits_the_section_without_a_question(self):
+        from oncall_agent.analysis.diagnose import build_prompt
+
+        identity = identify(FIVEXX_ALERT, llm=None)
+        assert "engineer asked" not in build_prompt(identity, None, None, [], [], [], [])

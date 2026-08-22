@@ -21,6 +21,7 @@ class Settings(BaseModel):
     slack_bot_token: str | None = None
     slack_app_token: str | None = None
 
+    llm_max_attempts: int = 4
     max_search_rounds: int = 3
     query_window_minutes: int = 60
 

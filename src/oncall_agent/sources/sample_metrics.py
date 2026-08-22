@@ -4,6 +4,7 @@ Shapes are modelled on real incidents: HPA oscillation during the 2026-06-10 a4a
 outage, and server-feed cold start after a deploy.
 """
 
+import re
 import time
 
 from ..models import AlertRule, MetricResult, MetricSeries
@@ -64,6 +65,25 @@ def _oscillating(base: float, swing: float, n: int = 60) -> list[tuple[float, fl
     ]
 
 
+def _hosts_in(expr: str) -> set[str]:
+    """Hosts named by a host=~"..." selector, if any."""
+    match = re.search(r'host=~"([^"]+)"', expr)
+    return set(match.group(1).split("|")) if match else set()
+
+
+def _scoped(result: MetricResult) -> MetricResult:
+    """Drop series the expression's host selector excludes.
+
+    Sample data that ignores its own selector would teach the model that scoping does
+    not matter — the opposite of the habit this tool is meant to reinforce.
+    """
+    hosts = _hosts_in(result.query)
+    if not hosts:
+        return result
+    result.series = [s for s in result.series if s.labels.get("host", "") in hosts]
+    return result
+
+
 def query(expr: str, *, minutes: int = 60) -> MetricResult:
     """Return plausible sample data keyed off what the expression mentions."""
     lowered = expr.lower()
@@ -107,6 +127,26 @@ def query(expr: str, *, minutes: int = 60) -> MetricResult:
                 MetricSeries(labels={"app": "server-a4api-default"}, points=_ramp(0.35, 0.42)),
             ],
         )
+
+    if "nginx_ingress_controller_requests" in lowered:
+        # Impact queries: error requests per second, then total, so a rate can be derived.
+        if "5.." in expr:
+            return _scoped(MetricResult(
+                query=expr,
+                source="sample",
+                series=[
+                    MetricSeries(labels={"host": "www.newsbreak.com"}, points=_ramp(0.4, 128.0)),
+                    MetricSeries(labels={"host": "api.newsbreak.com"}, points=_ramp(0.2, 1.1)),
+                ],
+            ))
+        return _scoped(MetricResult(
+            query=expr,
+            source="sample",
+            series=[
+                MetricSeries(labels={"host": "www.newsbreak.com"}, points=_ramp(720.0, 690.0)),
+                MetricSeries(labels={"host": "api.newsbreak.com"}, points=_ramp(4100.0, 4050.0)),
+            ],
+        ))
 
     if "5.." in expr or "5xx" in lowered:
         return MetricResult(

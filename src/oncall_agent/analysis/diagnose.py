@@ -32,6 +32,11 @@ Your job is to interpret gathered evidence, not to sound certain. Rules:
   useful than a confident guess.
 - Prefer the boring explanation. Deploy cold starts, single runaway clients, and
   scaling events explain more alerts than novel bugs do.
+- Write for the on-call engineer reading in Slack. Describe the system, never these
+  instructions or how the context was assembled. "No metrics are available" is useful;
+  "the system prompt says the metrics are fixtures" is not.
+- When the engineer asks a specific question, answer that question first. If the data
+  needed to answer it is missing, say which data and where to get it.
 """
 
 _DIAGNOSIS_SCHEMA = {
@@ -60,6 +65,7 @@ def build_prompt(
     knowledge: list[KnowledgeHit],
     benign: list[str],
     priors: list[str],
+    question: str | None = None,
 ) -> str:
     now = datetime.now()
     sections = [
@@ -89,11 +95,13 @@ def build_prompt(
 
     if metrics:
         if any(m.source == "sample" for m in metrics):
+            # Stated as a property of the data. Phrasing this as an instruction to the
+            # model gets it repeated back to the user as "the system prompt says…".
             sections.append(
-                "\n# Metrics — SAMPLE DATA, NOT THIS SYSTEM\n"
-                "No metrics backend is configured, so these numbers are fixtures. They "
-                "describe nothing about the live system. Do not cite them as evidence, "
-                "and cap your confidence at low."
+                "\n# Metrics (UNAVAILABLE)\n"
+                "This deployment has no metrics backend connected, so no measurements of "
+                "the live system exist. The figures below are static fixtures from the "
+                "test suite and describe a different, imaginary system."
             )
         else:
             sections.append("\n# Metrics")
@@ -120,6 +128,12 @@ def build_prompt(
             + "\n".join(f"- {p}" for p in priors)
         )
 
+    if question:
+        sections.append(
+            f"\n# What the engineer asked\n{question}\n"
+            "Answer this first. If the data needed is missing, name it explicitly."
+        )
+
     sections.append(
         "\n# Task\nDiagnose. Cite evidence for every claim. State whether the alerting "
         "service is the cause or a victim of something upstream."
@@ -136,8 +150,11 @@ def diagnose(
     knowledge: list[KnowledgeHit],
     benign: list[str],
     priors: list[str],
+    question: str | None = None,
 ) -> Diagnosis:
-    prompt = build_prompt(identity, rule, deployment, metrics, knowledge, benign, priors)
+    prompt = build_prompt(
+        identity, rule, deployment, metrics, knowledge, benign, priors, question
+    )
     result = llm.generate_json(prompt, _DIAGNOSIS_SCHEMA, deep=True, system=SYSTEM_PROMPT)
 
     return Diagnosis(

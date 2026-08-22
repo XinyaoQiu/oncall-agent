@@ -62,7 +62,7 @@ def build_app(settings: Settings) -> App:
 
         say(text=":mag: Looking into it…", thread_ts=thread_ts)
         try:
-            result = triage(alert_text, messages, settings=settings)
+            result = triage(alert_text, messages, question=request or None, settings=settings)
         except LLMUnavailable as exc:
             say(text=f":warning: I can't analyze this right now — {exc}", thread_ts=thread_ts)
             return

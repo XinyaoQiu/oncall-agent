@@ -73,7 +73,41 @@ def gather(
         results.append(grafana.replica_count(deployment.app_label, minutes=minutes))
         results.append(grafana.pod_starts(deployment.app_label, minutes=minutes))
 
+    results.extend(quantify_impact(grafana, identity, deployment, minutes=minutes))
     return results
+
+
+def quantify_impact(
+    grafana: GrafanaClient,
+    identity: AlertIdentity,
+    deployment: Deployment | None,
+    *,
+    minutes: int = 60,
+) -> list[MetricResult]:
+    """How many requests and hosts this is actually affecting.
+
+    Counts come from the ingress layer. Application logs are sampled — roughly 1 in 8 —
+    so counting there understates impact by nearly an order of magnitude. That mistake
+    is expensive precisely because the resulting number looks authoritative in an
+    incident review, so the source is fixed here rather than left to the caller.
+    """
+    hosts = identity.labels.get("host") or (
+        "|".join(deployment.hosts) if deployment else None
+    )
+    if not hosts:
+        return []
+
+    selector = f'host=~"{hosts}"'
+    return [
+        grafana.query_range(
+            f'sum(rate(nginx_ingress_controller_requests{{{selector},status=~"5.."}}[5m])) by (host)',
+            minutes=minutes,
+        ),
+        grafana.query_range(
+            f"sum(rate(nginx_ingress_controller_requests{{{selector}}}[5m])) by (host)",
+            minutes=minutes,
+        ),
+    ]
 
 
 def benign_checks(identity: AlertIdentity) -> list[str]:
