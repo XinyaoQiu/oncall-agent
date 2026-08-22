@@ -374,3 +374,119 @@ class TestMetricAccounting:
             metrics=[MetricResult(query="a", error="timeout")],
         )
         assert "1 failed" in format_reply(result)
+
+
+class FakeLLM:
+    """Replays a fixed action sequence, so loop control can be tested without a model."""
+
+    def __init__(self, actions):
+        self.actions = list(actions)
+        self.calls = 0
+        self.settings = Settings()
+
+    def generate_json(self, prompt, schema, *, deep=False, system=None):
+        self.calls += 1
+        return self.actions.pop(0) if self.actions else {"tool": "conclude", "reasoning": "done"}
+
+
+class TestInvestigationLoop:
+    """Budgets and guards are enforced in the loop, where the model has no vote."""
+
+    def _registry(self):
+        from oncall_agent.repos import Repo, RepoRegistry
+        from pathlib import Path
+
+        return RepoRegistry(repos=[Repo(name="server", path=Path("/tmp"))])
+
+    def test_round_limit_is_enforced(self):
+        from oncall_agent.investigate.loop import investigate
+
+        llm = FakeLLM([{"tool": "list_dir", "repo": "server", "reasoning": "look"}] * 20)
+        tools = {"list_dir": lambda **kw: type("R", (), {"text": "ok"})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=3)
+        assert inv.rounds == 3
+        assert "round limit" in inv.stopped_because
+
+    def test_conclude_stops_the_loop(self):
+        from oncall_agent.investigate.loop import investigate
+
+        llm = FakeLLM([
+            {"tool": "list_dir", "repo": "server", "reasoning": "look"},
+            {"tool": "conclude", "finding": "found it", "reasoning": "done"},
+        ])
+        tools = {"list_dir": lambda **kw: type("R", (), {"text": "ok"})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=6)
+        assert inv.rounds == 1
+        assert inv.finding == "found it"
+
+    def test_missing_required_arg_is_reported_not_retried_blindly(self):
+        from oncall_agent.investigate.loop import investigate
+
+        # A bare "tool error" leaves the model to guess, and it guesses by reissuing
+        # the same broken call until the budget is gone.
+        llm = FakeLLM([{"tool": "search_code", "reasoning": "search"}])
+        called = []
+        tools = {"search_code": lambda **kw: called.append(kw) or type("R", (), {"text": "x"})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=2)
+        assert called == [], "tool must not run without its required argument"
+        assert "requires pattern" in inv.steps[0].observation
+
+    def test_repeated_call_is_short_circuited(self):
+        from oncall_agent.investigate.loop import investigate
+
+        action = {"tool": "list_dir", "repo": "server", "reasoning": "look"}
+        llm = FakeLLM([dict(action), dict(action)])
+        calls = []
+        tools = {"list_dir": lambda **kw: calls.append(kw) or type("R", (), {"text": "ok"})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=4)
+        assert len(calls) == 1, "an identical call cannot yield a new observation"
+        assert "Already ran" in inv.steps[1].observation
+
+    def test_model_failure_stops_cleanly(self):
+        from oncall_agent.investigate.loop import investigate
+        from oncall_agent.llm import LLMUnavailable
+
+        class Failing(FakeLLM):
+            def generate_json(self, *a, **kw):
+                raise LLMUnavailable("overloaded")
+
+        inv = investigate(Failing([]), {}, self._registry(), "ctx", max_rounds=3)
+        assert inv.rounds == 0
+        assert "model unavailable" in inv.stopped_because
+
+    def test_observations_are_truncated(self):
+        from oncall_agent.investigate.loop import MAX_OBSERVATION_CHARS, investigate
+
+        llm = FakeLLM([{"tool": "list_dir", "repo": "server", "reasoning": "look"}])
+        tools = {"list_dir": lambda **kw: type("R", (), {"text": "x" * 99_000})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=2)
+        assert len(inv.steps[0].observation) < MAX_OBSERVATION_CHARS + 100
+
+
+class TestRepoRegistry:
+    def test_owning_repo_is_ranked_first(self):
+        from oncall_agent.repos import Repo, RepoRegistry
+        from pathlib import Path
+
+        registry = RepoRegistry(repos=[
+            Repo(name="other", path=Path("/tmp")),
+            Repo(name="server", path=Path("/tmp"), owns_services=["server-feed"]),
+        ])
+        assert registry.rank_for("server-feed")[0].name == "server"
+
+    def test_unowned_repos_are_ranked_not_removed(self):
+        from oncall_agent.repos import Repo, RepoRegistry
+        from pathlib import Path
+
+        registry = RepoRegistry(repos=[
+            Repo(name="other", path=Path("/tmp")),
+            Repo(name="server", path=Path("/tmp"), owns_services=["server-feed"]),
+        ])
+        # Cross-repo causes are the hard part of multi-repo triage; excluding a repo
+        # outright would hide them.
+        assert len(registry.rank_for("server-feed")) == 2

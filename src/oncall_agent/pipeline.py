@@ -3,10 +3,13 @@
 from .alerts import get_alert
 from .config import Settings
 from .llm import LLMClient
-from .models import ThreadMessage, TriageResult
+from .models import InvestigationSummary, ThreadMessage, TriageResult
+from .repos import default_registry
 from .sources.grafana import GrafanaClient
 from .sources.knowledge import KnowledgeRepo
 from .analysis import diagnose, evidence, identify, thread
+from .investigate.loop import investigate
+from .investigate.tools import build_toolset
 
 
 def _knowledge_terms(
@@ -41,6 +44,8 @@ def triage(
     question: str | None = None,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
+    deep: bool = True,
+    on_step=None,
 ) -> TriageResult:
     """Run the full pipeline.
 
@@ -81,10 +86,58 @@ def triage(
         knowledge_hits=hits,
         thread_priors=priors,
     )
+
+    if deep and settings.investigation_rounds > 0:
+        result.investigation = _investigate(
+            llm, settings, grafana, identity, rule, deployment, question, on_step
+        )
+
     result.diagnosis = diagnose.diagnose(
-        llm, identity, rule, deployment, metrics, hits, benign, priors, question
+        llm, identity, rule, deployment, metrics, hits, benign, priors, question,
+        investigation=result.investigation,
     )
     return result
+
+
+def _investigate(
+    llm, settings, grafana, identity, rule, deployment, question, on_step
+) -> InvestigationSummary | None:
+    """Run the search loop, letting the diagnosis proceed if it fails.
+
+    The loop is the part that can follow a lead the first pass did not anticipate, but
+    it is also the part most likely to run long or error — so a failure here degrades
+    the answer rather than losing the evidence already gathered.
+    """
+    registry = default_registry(settings.repo_root)
+    if not registry.available():
+        return None
+
+    lines = [f"Alert {identity.alert_name} firing."]
+    if identity.labels:
+        lines.append("Labels: " + ", ".join(f"{k}={v}" for k, v in identity.labels.items()))
+    if rule:
+        lines.append(f"Rule: {rule.expression}")
+    if deployment:
+        lines.append(f"Served by {deployment.app_label} ({', '.join(deployment.hosts)}).")
+    if question:
+        lines.append(f"The engineer asked: {question}")
+
+    try:
+        inv = investigate(
+            llm, build_toolset(settings, registry, grafana), registry, "\n".join(lines),
+            max_rounds=settings.investigation_rounds,
+            wall_clock_seconds=settings.investigation_seconds,
+            on_step=on_step,
+        )
+    except Exception:
+        return None
+
+    return InvestigationSummary(
+        rounds=inv.rounds,
+        finding=inv.finding,
+        stopped_because=inv.stopped_because,
+        tools_used=[s.tool for s in inv.steps],
+    )
 
 
 def format_reply(result: TriageResult) -> str:
@@ -114,6 +167,14 @@ def format_reply(result: TriageResult) -> str:
 
         if d.related_incidents:
             lines += ["", "*Related history*"] + [f"• {r}" for r in d.related_incidents]
+
+    inv = result.investigation
+    if inv and inv.finding:
+        lines += [
+            "",
+            f"*Code investigation* ({inv.rounds} rounds: {' → '.join(inv.tools_used)})",
+            inv.finding,
+        ]
 
     if d and d.degraded_tier:
         lines.insert(

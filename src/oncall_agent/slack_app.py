@@ -60,9 +60,26 @@ def build_app(settings: Settings) -> App:
             _handle_writeback(settings, channel, thread_ts, alert_text, messages, say)
             return
 
-        say(text=":mag: Looking into it…", thread_ts=thread_ts)
+        progress = say(text=":mag: Looking into it…", thread_ts=thread_ts)
+        steps: list[str] = []
+
+        def on_step(step):
+            """Stream progress: ninety silent seconds reads as a hung bot."""
+            steps.append(f"`{step.tool}` {_describe_args(step.args)}")
+            try:
+                client.chat_update(
+                    channel=channel,
+                    ts=progress["ts"],
+                    text=":mag: Investigating…\n" + "\n".join(f"• {s}" for s in steps),
+                )
+            except Exception as exc:
+                log.debug("progress update failed: %s", exc)
+
         try:
-            result = triage(alert_text, messages, question=request or None, settings=settings)
+            result = triage(
+                alert_text, messages, question=request or None,
+                settings=settings, on_step=on_step,
+            )
         except LLMUnavailable as exc:
             say(text=f":warning: I can't analyze this right now — {exc}", thread_ts=thread_ts)
             return
@@ -74,6 +91,13 @@ def build_app(settings: Settings) -> App:
         say(text=format_reply(result), thread_ts=thread_ts)
 
     return app
+
+
+def _describe_args(args: dict) -> str:
+    for key in ("pattern", "path", "expr", "repo"):
+        if value := args.get(key):
+            return f"{value}"
+    return ""
 
 
 def _wants_writeback(text: str) -> bool:

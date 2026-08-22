@@ -21,6 +21,10 @@ class Settings(BaseModel):
     slack_bot_token: str | None = None
     slack_app_token: str | None = None
 
+    repo_root: Path = Path.home() / "Project"
+    investigation_rounds: int = 6
+    investigation_seconds: float = 90.0
+
     llm_max_attempts: int = 4
     max_search_rounds: int = 3
     query_window_minutes: int = 60
@@ -37,6 +41,7 @@ class Settings(BaseModel):
             knowledge_repo=Path(
                 os.getenv("KNOWLEDGE_REPO", str(Path.home() / "Project" / "rec-knowledge"))
             ),
+            repo_root=Path(os.getenv("REPO_ROOT", str(Path.home() / "Project"))),
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
             slack_app_token=os.getenv("SLACK_APP_TOKEN"),
         )

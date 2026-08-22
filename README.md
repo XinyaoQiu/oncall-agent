@@ -21,6 +21,8 @@ Resolve host/path → deployment                 ← a lookup, not a search
    ▼
 Query metrics + search rec-knowledge + read thread priors
    ▼
+Investigation loop          model picks a tool, sees the result, picks the next
+   ▼
 Diagnose (Gemini)           confidence-tagged, every claim cites its evidence
    ▼
 Reply in thread
@@ -36,6 +38,11 @@ wrong number fails silently and ends up in the incident review as fact.
 half its analysis renders identically to a complete one, and nobody re-reads it during an
 incident to check.
 
+**The search loop is where the model decides.** Evidence gathering is fixed — which
+metrics to pull follows from the alert. But code localization cannot be planned in
+advance: what to grep next depends on what the last grep returned. Budgets on that loop
+live in code, not in the prompt.
+
 ## Setup
 
 ```bash
@@ -50,6 +57,7 @@ Environment:
 | `SLACK_BOT_TOKEN` | for Slack | `xoxb-…` |
 | `SLACK_APP_TOKEN` | for Slack | `xapp-…`, Socket Mode |
 | `KNOWLEDGE_REPO` | no | Path to a `rec-knowledge` clone |
+| `REPO_ROOT` | no | Directory holding the repos to search (default `~/Project`) |
 | `GRAFANA_URL` / `GRAFANA_TOKEN` | no | Real metrics; sample data is used without them |
 | `USE_SAMPLE_METRICS` | no | Force sample data |
 
@@ -98,8 +106,10 @@ src/oncall_agent/
 ├── pipeline.py         orchestration
 ├── slack_app.py        Slack entry point
 ├── cli.py              command line
+├── repos.py            registry of searchable repositories
 ├── sources/            grafana, knowledge repo, sample metrics
-└── analysis/           identify, thread priors, evidence, diagnose, writeback
+├── analysis/           identify, thread priors, evidence, diagnose, writeback
+└── investigate/        the search loop and its tools
 ```
 
 `analysis/evidence.py` makes no model calls: gathering measurements is different work

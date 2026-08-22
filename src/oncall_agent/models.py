@@ -146,6 +146,15 @@ class Diagnosis(BaseModel):
     degraded_tier: bool = False
 
 
+class InvestigationSummary(BaseModel):
+    """What the search loop established, if it ran."""
+
+    rounds: int = 0
+    finding: str | None = None
+    stopped_because: str = ""
+    tools_used: list[str] = Field(default_factory=list)
+
+
 class TriageResult(BaseModel):
     """Everything one invocation produced."""
 
@@ -155,6 +164,7 @@ class TriageResult(BaseModel):
     knowledge_hits: list[KnowledgeHit] = Field(default_factory=list)
     diagnosis: Diagnosis | None = None
     thread_priors: list[str] = Field(default_factory=list)
+    investigation: InvestigationSummary | None = None
 
 
 class KnowledgeEntry(BaseModel):
