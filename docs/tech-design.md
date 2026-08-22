@@ -41,6 +41,10 @@ produced it.
 on day one. An evidence pack is useful even when its hypothesis is wrong, which is what
 gets the tool used long enough to earn the right to a stronger claim later.
 
+This split is about *presentation and trust*, not availability. It does not mean the
+product still works when the model is down — see §8.1: an unavailable model is an error,
+and the agent declines rather than shipping a half-analysis that reads as a whole one.
+
 ---
 
 ## 2. The investigation this automates
@@ -76,22 +80,46 @@ the product value.
 
 ---
 
-## 3. Alert preprocessing — the PromQL expression is the primary signal
+## 3. Alert preprocessing — two stages
 
-The alerts this team actually receives are **Prometheus/Mimir PromQL alerts**, not stack
-traces. Examples from the current rotation: `get_empty_docids`, `news-list-for-channel`
-p99 latency, feed-channel-empty, large-scale 5xx.
+The alerts this team receives are **Prometheus/Mimir PromQL alerts**, and they arrive as
+**rendered Slack messages**. A human then @-mentions the agent in the thread (§12).
 
-The single highest-quality search term source is therefore **the alert's own query**:
+That shapes preprocessing into two stages with very different trust levels:
+
+```
+Slack message text
+  │
+  ├─ Stage 1 — identification        (rules → LLM fallback)
+  │    Answers only "which alert is this", plus key labels.
+  │    Approximate is fine.
+  │    ⚠ Numbers in the text are reference only. They never enter the evidence pack.
+  │
+  └─ Stage 2 — authoritative retrieval
+       alert name → Grafana / Alertmanager rule lookup → the real PromQL expression
+       → reproduce at the alert's own granularity (§3.1)
+```
+
+**The Slack message is an identification signal, not a data source.** Rendered alert text
+is templated: values get rounded, labels get dropped, long expressions get truncated.
+Treating it as data introduces a second, untrusted measurement of a quantity the metrics
+store already holds authoritatively — the same failure class §5.1 guards against.
+
+Identification is allowed to be approximate; measurement is not. The asymmetry is in how
+each fails: a wrong identification fails **loudly** at the rule-lookup step, because the
+alert name won't resolve. A wrong number fails **silently**, and shows up in an incident
+review as fact.
+
+Once Stage 2 has the authoritative rule, the extraction targets are as before:
 
 | Alert content | Extracted | Used for |
 |---|---|---|
-| **PromQL expression** | `host` / `path` / `app` / `callee` labels | Deployment + code scope (§4) |
+| **PromQL expression** (from the rule) | `host` / `path` / `app` / `callee` labels | Deployment + code scope (§4) |
 | **Alert label dimensions** | The exact grouping the alert fired on | Reproduction query scope |
 | Firing window | Start/end, ramp shape | Deploy + HPA event correlation |
-| Threshold + current value | Severity, ramp rate | Impact estimate scope |
+| Threshold + firing value (from metrics) | Severity, ramp rate | Impact estimate scope |
 | Stack trace *(when present)* | Class/method names | Direct code search terms |
-| Log line *(when present)* | Template → emitting call site (§4.3) | Code localization |
+| Log line *(when present)* | Template → emitting call site (§4.4) | Code localization |
 
 ### 3.1 Reproduce with the alert's own query first
 
@@ -120,6 +148,28 @@ cheap and short-circuits a large fraction of pages:
 
 These are encoded as a checklist the agent runs, with results in the evidence pack —
 including when a benign pattern is *ruled out*, which is itself informative.
+
+### 3.3 Thread context as prior input
+
+By the time a human @-mentions the agent, the thread usually contains discussion already —
+"is this the cold-start thing again?", "CPU looks fine to me", "I think it's the comment
+cluster". This is high-quality prior information and it is free.
+
+Used for:
+
+- Directions a human already excluded → deprioritized in ordering, and shown as such
+- Services or components a human named → searched first
+- Surfaced in the pack's "already established in thread" section, so the agent doesn't
+  repeat back what people just said
+
+**Hard constraint: thread context affects ordering and presentation only. It never
+suppresses evidence collection.** A human saying "CPU is fine" must not cause the agent to
+skip CPU collection — the human may be wrong, may have looked at the wrong dashboard, or
+may have looked before the spike. The pack's value depends on being complete and
+independently gathered. Prior information reorders work; it never removes it.
+
+The @-mention itself is also a signal: a person has read the alert and decided help is
+wanted. That is a better trigger than firing on every alert (§12).
 
 ---
 
@@ -216,7 +266,7 @@ Retrieval mechanism follows the data's nature:
 | **ES `server_logs`** | Structured query | **Sampled ~1/8 — qualitative only.** Per-func/path breakdown, trace following |
 | **K8s state** | Structured query | `kube_pod_start_time`, ReplicaSet, HPA events |
 | **Code** | Lexical + agentic (§4) | Identifiers are exact tokens |
-| **`rec-knowledge`** | BM25 + dense, RRF fused | **Existing repo — reused, not rebuilt.** See §6 |
+| **`rec-knowledge`** | Lexical (ripgrep) + agentic iteration | **Existing repo — reused, not rebuilt.** Same tooling as code (§6.1) |
 | **Deploy history** | Structured query | Jenkins + `git_log`, correlated to alert window |
 
 ### 5.1 Sampling semantics are enforced in the tool layer, not the prompt
@@ -254,6 +304,28 @@ than one that declines to answer.
 "query returned nothing because of a retention boundary, a sharding fault, or a wrong
 index", and surfaces which one it was.
 
+### 5.2 Operational records
+
+Three distinct data classes get conflated under "history". They belong in different places:
+
+| Data | Written by | Reviewed by | Store |
+|---|---|---|---|
+| **Knowledge entries** | The agent, via PR (§7) | Human review + merge | git (`rec-knowledge`) |
+| **Operational records** | The agent | — | **Postgres** |
+
+Operational records = one row per invocation: which alert, which queries were issued, what
+the evidence pack contained, what hypothesis was offered at what confidence, and whether a
+human later corrected it. Plus the labeled set (§9.1) and evaluation results.
+
+**This layer is mandatory, not optional instrumentation.** Every metric in §9 —
+false-confidence rate, evidence-pack completeness, time-to-diagnosis — is computable only
+from these records. Without it, the entire evaluation section is unimplementable.
+
+Postgres rather than a file or an embedded database: the agent runs as multiple replicas,
+so the store must be shared and network-reachable. The §9 metrics are time-bucketed
+aggregations over alert name and confidence, which is a relational workload, and evidence
+packs land naturally in `jsonb`.
+
 ---
 
 ## 6. Knowledge storage — reuse `rec-knowledge`
@@ -264,16 +336,43 @@ runbooks. **This is the source of truth. Do not build a new knowledge base.**
 ```
 rec-knowledge (git, existing)
   ├─ git pull master before every retrieval session   ← required; the repo goes stale locally
-  ├─ PR review = the existing human approval gate
+  ├─ the agent opens PRs (§7); humans review and merge
   └─ version history, diffs, revert come free
-        │  sync job
-        ▼
-   Embedding index (rebuildable derivative)
 ```
 
-Why git rather than a database: the maintainers are engineers, the PR flow *is* the review
-process, and history is free. The index is a rebuildable derivative, so changing the
-embedding model or chunking strategy never risks the authoritative content.
+Why git rather than a database: **the writer is a model, not a human.** PR review is not a
+collaboration convention here — it is the safety mechanism. §7 requires model-generated
+writes to be retry-safe and reversible, and PR diff / revert / attribution is exactly that.
+When people author content, PR review is good practice; when a model authors it, PR review
+is the control that makes the write path acceptable at all. History and blame come free,
+and engineers can still edit directly.
+
+### 6.1 Retrieval — the same lexical tooling as code search
+
+**No vector index.** `rec-knowledge` is retrieved with the §4.2 toolset — ripgrep over a
+local git repo, driven by the same agentic loop — pointed at the knowledge repo instead of
+the service repo.
+
+This replaces an earlier embedding-index design. Three reasons:
+
+1. **The corpus is small and the queries are exact.** A few hundred markdown files, queried
+   with the high-quality identifiers §3 already extracts — service names, alert names, error
+   codes. That is lexical retrieval's strong case.
+2. **The loop handles paraphrase better than a fixed pipeline does.** The concern that
+   motivated embeddings was synonymy ("OOM" vs "memory exhaustion" vs "container killed").
+   An agentic loop addresses it directly: the model sees round one's hits and re-queries with
+   different wording. A pre-built index has to guess the right vocabulary up front — which is
+   the same argument §4.2 already makes for code.
+3. **No new infrastructure, and one less component.** Knowledge retrieval reuses the code
+   search tools rather than owning a parallel implementation.
+
+**Retrieval lives on the hypothesis side, not the evidence side** (§1). "Which past incident
+resembles this one" is a judgment, not a measurement. It is not part of the deterministic
+half and does not have a non-model fallback — consistent with §8.1.
+
+**Migration signal**, should it ever be needed: not entry count, but lexical search
+repeatedly missing entries a human knew were there, or metadata filtering (service + time
+window + incident class) becoming the dominant access pattern.
 
 Confluence incident write-ups are a **second** source, synced read-only. They are richer
 than `rec-knowledge` entries but not engineer-editable in the same loop.
@@ -355,7 +454,7 @@ Alert
  ├─ Deployment resolution       (table lookup, §4.1)         │
  ├─ Pod/HPA/deploy events       (structured)                 ├─ parallel
  ├─ Benign-pattern checklist    (structured, §3.2)           │
- ├─ rec-knowledge retrieval     (BM25 + dense, RRF)          │
+ ├─ rec-knowledge retrieval     (agentic lexical, §6.1)      │
  └─ Code search                 (agentic, multi-round, §4.2) ┘
  ▼
 Assemble under context budget
@@ -372,19 +471,45 @@ Hard limits enforced in the routing function, where the model has **no veto**:
   has returned when the budget expires and marks the rest as timed out.
 - **Token budget**
 
-### 8.1 Model tiering and degradation
+### 8.1 Model tiering and failure behavior
 
-| Call site | Latency need | Tier | Degradation |
+| Call site | Latency need | Tier | On failure |
 |---|---|---|---|
-| Alert parsing / term extraction | Low | Small / deterministic | Pure regex + PromQL parser fallback |
+| Alert identification fallback | Low | Small | Rules only; unidentified → ask the human |
 | Code-search iteration | Medium | Mid | Fewer rounds, wider truncation |
-| Hypothesis synthesis | Tolerant | Large | **Drop to evidence-pack-only** |
+| Knowledge retrieval loop | Medium | Mid | Reported as failed; no fallback path |
+| Hypothesis synthesis | Tolerant | Large | Reported as failed |
 | Knowledge extraction (write path) | Offline | Large | Defer; never degrade quality |
 
-**Full LLM outage degrades to the evidence pack**, which is deterministic and needs no
-model. Steps 1, 2, 5, 7 keep working. This is a deliberate consequence of the §1 split:
-the useful half of the product does not depend on the LLM being up — which is exactly the
-property you want in a tool used during outages.
+**An unavailable LLM is an error, not a degraded mode.** The agent reports the failure and
+declines to answer. It does not emit a partial pack that looks like a normal one.
+
+This corrects an earlier version of this design, which treated "fall back to the evidence
+pack" as a feature. It isn't. An evidence pack produced without the model is missing
+victim/cause discrimination, related incident history, and code localization — but it
+renders identically to a complete one: same format, same tables, same confident layout.
+During an incident nobody stops to ask whether half the analysis is silently absent. A
+response that looks complete and isn't is worse than a visible failure, and the on-call
+context is exactly where that gap does the most damage.
+
+**Failure reporting is two-layered:**
+
+```
+A call fails
+  ├─ LLM still reachable → the model composes the failure report itself:
+  │     what was collected, which step failed, what the human should do next
+  └─ LLM unreachable     → deterministic error: failed step + what was collected
+```
+
+The first layer is the useful one. A model that can see the collected evidence writes a
+far better handoff than a template can — "CPU and deploy data are clean, code localization
+failed, suggest grepping X by hand" beats "Error: hypothesis generation failed."
+
+**That report is schema-constrained to `collected` / `failed_step` / `reason` /
+`suggested_next_action`.** There is no field for a root-cause guess. Left unconstrained, a
+model asked to explain a failure will reach for "based on the available evidence, this is
+probably…" — reintroducing exactly the unreliable answer this section exists to prevent.
+The schema removes the option rather than prohibiting it in a prompt.
 
 ---
 
@@ -430,8 +555,14 @@ System-level:
 | Cost per query | |
 
 The false-confidence rate governs whether the hypothesis half stays enabled. If it can't be
-held low, the system reverts to evidence-only — a supported, pre-designed configuration,
-not a failure state.
+held low, the deployment is **configured** to evidence-only and says so — the pack states
+that hypothesis generation is disabled.
+
+This is not the same as §8.1's failure case, and the difference matters. Here the operator
+has decided the model isn't accurate enough, the change is deliberate, and readers are told
+what they are getting. There the model was expected to run and didn't, and the danger is a
+pack that silently omits half its analysis. A configured absence is honest; an unannounced
+one is not.
 
 ---
 
@@ -502,37 +633,50 @@ Requirements on the shared layer:
 
 ## 12. Rollout
 
-1. **Read-only evidence pack, manual invocation.** Slack slash command against a live
-   alert. Validates §4.1 and §5.1 against reality with zero risk.
-2. **Auto-trigger on alert fire**, posting the evidence pack into the incident channel.
-   Measure whether it is read and whether time-to-diagnosis moves.
-3. **Enable the hypothesis half**, gated on false-confidence rate from the labeled set.
+The entry point is a **Slack thread @-mention**: the alert posts to the channel as it does
+today, and an engineer pulls the agent in when they want it.
+
+1. **Evidence pack on mention.** The agent reads the thread, identifies the alert (§3),
+   pulls the authoritative rule, and replies in-thread. Read-only. Validates §4.1 and §5.1
+   against reality at zero risk.
+2. **Broaden alert coverage** — more alert types recognized in Stage 1, more benign-pattern
+   checks. Still summoned, never pushed.
+3. **Enable the hypothesis half**, gated on false-confidence rate against the labeled set.
 4. **Enable the write path**, 100% human review, admission-gated per §7.1.
 
+**Automatic posting on every alert fire is deliberately not on this path.** The mention is
+itself a signal — a person has seen the alert and judged that help is useful. Unsolicited
+posting on every page trains people to scroll past the agent, which is difficult to undo.
+If auto-trigger is ever revisited, it should be scoped to specific alerts with a measured
+track record, not enabled globally.
+
 Each stage is independently useful and independently revertable. Stage 1 delivers most of
-the measurable time savings, which is the argument for shipping it before anything else is
-built.
+the measurable time savings, which is the argument for shipping it before anything else.
 
 ---
 
 ## Design principles applied
 
 1. **Ask where the answer lives before choosing an architecture.** Metrics → structured
-   queries. Code → lexical. Prose → dense retrieval. Assuming "this is a RAG" leads to
-   forcing all four through one index.
-2. **Retrieval mechanism follows the data's nature.** Identifiers want lexical; prose wants
-   dense; relationships want structured queries.
+   queries. Code and runbooks → lexical search over local repos. Assuming "this is a RAG"
+   leads to forcing all of it through one index.
+2. **Retrieval mechanism follows the data's nature — and corpus size is part of that.**
+   Identifiers want lexical; relationships want structured queries. A few hundred local
+   markdown files queried by exact identifiers do not need an embedding index; an agentic
+   loop over grep handles the paraphrase case that would otherwise motivate one.
 3. **Correctness and safety decisions are code, not prompts.** Sampling semantics, impact-source
    routing, budget caps, permission scopes. The model advises; it does not decide.
 4. **Isolation by construction, not by instruction.** Disjoint tool sets beat permission
    checks, which beat prompt instructions.
 5. **Identity is injected, never model-supplied.**
-6. **Source of truth and index are separate.** `rec-knowledge` is authoritative; the
-   embedding index is a rebuildable derivative.
+6. **Source of truth is git, because the writer is a model.** PR review is the safety
+   mechanism for model-generated writes, not a collaboration habit — it makes them
+   reviewable, attributable, and revertable.
 7. **Freshness mechanics follow expiry mechanics.** Silent expiry → decay and staleness
    scans. (Explicit expiry → date filters — that's the companion system, and swapping them
    is a mistake.)
 8. **Build the labeled set from what's already written down.** Retroactive construction
    from postmortems beats prospective note-taking that nobody has time to do.
-9. **The deterministic half must survive the model being wrong or down.** That's what makes
-   an incident tool trustworthy enough to be adopted.
+9. **A missing model is an error, not a degraded mode.** A partial answer that renders like
+   a complete one is the most dangerous output an incident tool can produce. Fail visibly,
+   and let the model explain its own failure when it is still reachable enough to do so.
