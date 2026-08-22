@@ -6,6 +6,7 @@ during an incident to check.
 """
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -13,6 +14,10 @@ from google import genai
 from google.genai import types
 
 from .config import Settings
+
+# The SDK warns about automatic function calling on every call. No tools are declared
+# here, so the warning is pure noise in the logs.
+logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 
 class LLMUnavailable(RuntimeError):

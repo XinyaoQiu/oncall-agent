@@ -171,6 +171,22 @@ independently gathered. Prior information reorders work; it never removes it.
 The @-mention itself is also a signal: a person has read the alert and decided help is
 wanted. That is a better trigger than firing on every alert (§12).
 
+### 3.4 The mention text is an input, not just a trigger
+
+What the engineer types when summoning the agent — "find the root cause and production
+impact", "is this the cold start thing", "how many users are affected" — states what they
+actually want. Discarding it and running a fixed analysis wastes the most direct signal
+available about the reply's purpose.
+
+The question is passed to the diagnosis step and answered first. When the data needed to
+answer it is missing, the reply names the missing data rather than answering a different
+question well.
+
+This does not change what evidence is collected. Collection is driven by the alert; the
+question shapes emphasis and ordering in the reply. Letting the question narrow collection
+would reintroduce the failure §3.3 guards against — a stated belief steering the agent away
+from the measurement that would have contradicted it.
+
 ---
 
 ## 4. Service and code localization
@@ -300,11 +316,28 @@ override this — it's a routing decision in code, not an instruction the model 
 A model that reports a 7×-understated user-impact number in an incident review is worse
 than one that declines to answer.
 
+### 5.2 Impact quantification
+
+Step 7 asks how much is actually affected. Two ingress-layer queries answer it: error
+requests per second scoped to the alerting host, and total requests over the same window,
+so a rate can be derived rather than asserted.
+
+**The source is fixed in the tool, not chosen by the caller.** Application logs are
+sampled at roughly 1 in 8, so counting impact there understates it by nearly an order of
+magnitude. That specific error is expensive because the resulting number carries into an
+incident review looking authoritative, and nobody re-derives it. Routing the query is a
+correctness decision, so it lives in code — the same reasoning §5.1 applies to sampling
+metadata.
+
+Scope follows the alert: a host-scoped alert produces host-scoped impact queries. An alert
+with no host or deployment produces none, rather than a site-wide number that answers a
+question nobody asked.
+
 **Empty result ≠ healthy.** Every query path distinguishes "zero matching events" from
 "query returned nothing because of a retention boundary, a sharding fault, or a wrong
 index", and surfaces which one it was.
 
-### 5.2 Operational records
+### 5.3 Operational records
 
 Three distinct data classes get conflated under "history". They belong in different places:
 

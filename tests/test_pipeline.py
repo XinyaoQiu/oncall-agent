@@ -184,10 +184,12 @@ class TestSampleDataDisclosure:
         result, deployment = self._sample_result()
         prompt = build_prompt(result.identity, result.rule, deployment, result.metrics, [], [], [])
 
-        assert "UNAVAILABLE" in prompt
-        assert "static fixtures" in prompt
-        # Phrased as a fact about the data, not an instruction the model can quote back.
+        assert "No metrics backend is connected" in prompt
+        assert "fixtures, not measurements" in prompt
+        # Stated as a fact about the system. Prose about the prompt's own structure gets
+        # quoted back to the user as "the metrics section states...".
         assert "Do not cite" not in prompt
+        assert "system prompt" not in prompt.lower()
 
     def test_prompt_includes_current_time(self):
         from oncall_agent.analysis.diagnose import build_prompt

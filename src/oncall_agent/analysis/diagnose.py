@@ -95,13 +95,13 @@ def build_prompt(
 
     if metrics:
         if any(m.source == "sample" for m in metrics):
-            # Stated as a property of the data. Phrasing this as an instruction to the
-            # model gets it repeated back to the user as "the system prompt says…".
+            # Describe the world, not the prompt. Given prose about "the metrics
+            # section", the model quotes the scaffolding back to the user; given a plain
+            # fact about the system, it reports the fact.
             sections.append(
-                "\n# Metrics (UNAVAILABLE)\n"
-                "This deployment has no metrics backend connected, so no measurements of "
-                "the live system exist. The figures below are static fixtures from the "
-                "test suite and describe a different, imaginary system."
+                "\n# System state\nNo metrics backend is connected to this deployment. "
+                "No measurements of the live system exist.\n"
+                "\n# Metrics (fixtures, not measurements)"
             )
         else:
             sections.append("\n# Metrics")
