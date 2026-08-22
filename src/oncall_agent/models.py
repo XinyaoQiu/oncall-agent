@@ -1,0 +1,128 @@
+"""Data models for the triage pipeline."""
+
+from datetime import datetime
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+
+class Confidence(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class ThreadMessage(BaseModel):
+    """One message in a Slack thread."""
+
+    user: str
+    text: str
+    ts: str
+    is_bot: bool = False
+
+
+class AlertIdentity(BaseModel):
+    """Stage 1 output: which alert this is.
+
+    Deliberately approximate. A wrong identification fails loudly at rule lookup,
+    unlike a wrong metric value which fails silently.
+    """
+
+    alert_name: str
+    labels: dict[str, str] = Field(default_factory=dict)
+    fired_at: datetime | None = None
+    confidence: Confidence = Confidence.MEDIUM
+    identified_by: str = "rules"
+
+
+class AlertRule(BaseModel):
+    """Stage 2 output: the authoritative rule definition from Grafana."""
+
+    name: str
+    expression: str
+    duration: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    annotations: dict[str, str] = Field(default_factory=dict)
+
+
+class MetricSeries(BaseModel):
+    labels: dict[str, str]
+    points: list[tuple[float, float]]
+
+    def peak(self) -> float | None:
+        return max((v for _, v in self.points), default=None)
+
+
+class MetricResult(BaseModel):
+    """A metric query result, always carrying the query that produced it."""
+
+    query: str
+    series: list[MetricSeries] = Field(default_factory=list)
+    source: str = "grafana"
+    error: str | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.series
+
+    def summarize(self, limit: int = 5) -> str:
+        """Compact text form for the prompt."""
+        if self.error:
+            return f"query failed: {self.error}"
+        if self.is_empty:
+            # An empty result is not evidence of health.
+            return "no data returned (this is not the same as 'healthy')"
+
+        lines = []
+        for s in self.series[:limit]:
+            label_str = ", ".join(f"{k}={v}" for k, v in s.labels.items())
+            peak = s.peak()
+            lines.append(f"  {{{label_str}}} peak={peak:.4g}" if peak else f"  {{{label_str}}}")
+        if len(self.series) > limit:
+            lines.append(f"  ... and {len(self.series) - limit} more series")
+        return "\n".join(lines)
+
+
+class KnowledgeHit(BaseModel):
+    """A match from rec-knowledge."""
+
+    path: str
+    line_number: int
+    line: str
+    matched_term: str
+    context: str = ""
+
+
+class Diagnosis(BaseModel):
+    """The model's analysis. Every claim must cite what it came from."""
+
+    summary: str
+    likely_cause: str
+    confidence: Confidence
+    victim_or_cause: str = Field(
+        description="Whether the alerting service is the origin or a downstream victim"
+    )
+    evidence_cited: list[str] = Field(default_factory=list)
+    suggested_next_steps: list[str] = Field(default_factory=list)
+    related_incidents: list[str] = Field(default_factory=list)
+
+
+class TriageResult(BaseModel):
+    """Everything one invocation produced."""
+
+    identity: AlertIdentity
+    rule: AlertRule | None = None
+    metrics: list[MetricResult] = Field(default_factory=list)
+    knowledge_hits: list[KnowledgeHit] = Field(default_factory=list)
+    diagnosis: Diagnosis | None = None
+    thread_priors: list[str] = Field(default_factory=list)
+
+
+class KnowledgeEntry(BaseModel):
+    """A candidate write-back to rec-knowledge."""
+
+    title: str
+    filename: str
+    body: str
+    services: list[str] = Field(default_factory=list)
+    supersedes: str | None = None
