@@ -8,8 +8,8 @@ from pydantic import BaseModel
 
 class Settings(BaseModel):
     gemini_api_key: str | None = None
-    gemini_model_fast: str = "gemini-2.0-flash"
-    gemini_model_deep: str = "gemini-2.5-pro"
+    gemini_model_fast: str = "gemini-flash-latest"
+    gemini_model_deep: str = "gemini-pro-latest"
 
     grafana_url: str | None = None
     grafana_token: str | None = None

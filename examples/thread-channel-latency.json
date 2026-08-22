@@ -1,0 +1,6 @@
+[
+  {"user": "alertmanager", "text": "[FIRING] news-list-for-channel p99 latency\napp=server-feed path=/Website/channel/news-list-for-channel\nvalue: 3.2s (threshold 2s)", "ts": "1755800000.000100", "is_bot": true},
+  {"user": "U_ALICE", "text": "seeing this too, is it the cold start thing again?", "ts": "1755800120.000200"},
+  {"user": "U_BOB", "text": "checked CPU on server-feed, looks fine to me", "ts": "1755800180.000300"},
+  {"user": "U_ALICE", "text": "there was a deploy about 10 min before it fired", "ts": "1755800240.000400"}
+]
