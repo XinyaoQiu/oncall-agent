@@ -94,18 +94,7 @@ def build_prompt(
         )
 
     if metrics:
-        if any(m.source == "sample" for m in metrics):
-            # Describe the world, not the prompt. Given prose about "the metrics
-            # section", the model quotes the scaffolding back to the user; given a plain
-            # fact about the system, it reports the fact.
-            sections.append(
-                "\n# System state\nNo metrics backend is connected to this deployment. "
-                "No measurements of the live system exist.\n"
-                "\n# Metrics (fixtures, not measurements)"
-            )
-        else:
-            sections.append("\n# Metrics")
-
+        sections.append("\n# Metrics")
         for m in metrics:
             sections.append(f"query: {m.query}\n{m.summarize()}")
 
@@ -155,7 +144,21 @@ def diagnose(
     prompt = build_prompt(
         identity, rule, deployment, metrics, knowledge, benign, priors, question
     )
-    result = llm.generate_json(prompt, _DIAGNOSIS_SCHEMA, deep=True, system=SYSTEM_PROMPT)
+
+    # Kept out of the prompt body: anything placed among the evidence gets cited as
+    # evidence, and the engineer ends up reading about the prompt's own sections rather
+    # than about their outage. As a standing rule it shapes the writing instead.
+    system = SYSTEM_PROMPT
+    if any(m.source == "sample" for m in metrics):
+        system += (
+            "\nThe metric figures in this request are synthetic test fixtures, not "
+            "measurements of any real system. Treat every one of them as unknown: draw "
+            "no conclusions from them, cite none of them, and keep confidence low. State "
+            "plainly that live metrics are unavailable, without describing this request "
+            "or its structure.\n"
+        )
+
+    result = llm.generate_json(prompt, _DIAGNOSIS_SCHEMA, deep=True, system=system)
 
     model = result.get("_model")
     return Diagnosis(

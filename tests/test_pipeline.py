@@ -178,17 +178,16 @@ class TestSampleDataDisclosure:
         metrics = evidence.gather(grafana, identity, rule, deployment)
         return TriageResult(identity=identity, rule=rule, metrics=metrics), deployment
 
-    def test_prompt_marks_sample_data(self):
+    def test_sample_caveat_stays_out_of_the_evidence(self):
         from oncall_agent.analysis.diagnose import build_prompt
 
         result, deployment = self._sample_result()
         prompt = build_prompt(result.identity, result.rule, deployment, result.metrics, [], [], [])
 
-        assert "No metrics backend is connected" in prompt
-        assert "fixtures, not measurements" in prompt
-        # Stated as a fact about the system. Prose about the prompt's own structure gets
-        # quoted back to the user as "the metrics section states...".
-        assert "Do not cite" not in prompt
+        # Anything sitting among the evidence gets cited as evidence — the engineer then
+        # reads about the prompt's own sections instead of about their outage.
+        assert "fixture" not in prompt.lower()
+        assert "sample" not in prompt.lower()
         assert "system prompt" not in prompt.lower()
 
     def test_prompt_includes_current_time(self):

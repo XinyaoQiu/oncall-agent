@@ -29,6 +29,8 @@ class Settings(BaseModel):
     def from_env(cls) -> "Settings":
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY"),
+            gemini_model_fast=os.getenv("GEMINI_MODEL_FAST", "gemini-flash-latest"),
+            gemini_model_deep=os.getenv("GEMINI_MODEL_DEEP", "gemini-pro-latest"),
             grafana_url=os.getenv("GRAFANA_URL"),
             grafana_token=os.getenv("GRAFANA_TOKEN"),
             use_sample_metrics=os.getenv("USE_SAMPLE_METRICS", "").lower() in ("1", "true", "yes"),
