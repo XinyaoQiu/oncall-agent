@@ -94,6 +94,60 @@ def evidence(
 
 
 @app.command()
+def record(
+    alert: str = typer.Argument(..., help="Alert text, or a path to a file containing it"),
+    thread: Path = typer.Option(None, help="JSON file with thread messages"),
+    dry_run: bool = typer.Option(True, help="Print the draft instead of opening a PR"),
+):
+    """Draft a rec-knowledge entry from a resolved incident thread."""
+    from .analysis import writeback
+    from .analysis.identify import identify
+    from .llm import LLMClient
+
+    settings = Settings.from_env()
+    text = Path(alert).read_text() if Path(alert).is_file() else alert
+
+    messages = []
+    if thread:
+        messages = [ThreadMessage(**m) for m in json.loads(thread.read_text())]
+
+    try:
+        llm = LLMClient(settings)
+    except LLMUnavailable as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    repo = KnowledgeRepo(settings.knowledge_repo)
+    repo.pull()
+
+    identity = identify(text, llm)
+    existing = repo.search_many([identity.alert_name], max_per_term=5)
+
+    try:
+        entry = writeback.extract(llm, identity.alert_name, messages, None, existing)
+    except LLMUnavailable as exc:
+        typer.secho(f"Extraction failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    if entry is None:
+        typer.echo("Declined: no durable lesson worth recording in this thread.")
+        return
+
+    typer.echo(f"--- {entry.filename} ---")
+    typer.echo(entry.body)
+
+    if entry.supersedes:
+        typer.secho(f"supersedes: {entry.supersedes}", fg=typer.colors.YELLOW)
+
+    if dry_run:
+        typer.echo("\n(dry run — pass --no-dry-run to open a PR)")
+        return
+
+    url = repo.open_pr(entry, alert_name=identity.alert_name)
+    typer.secho(f"PR opened: {url}", fg=typer.colors.GREEN)
+
+
+@app.command()
 def serve():
     """Start the Slack bot."""
     from .slack_app import run
