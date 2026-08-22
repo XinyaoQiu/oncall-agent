@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: oncall-agent-db
+    environment:
+      POSTGRES_USER: oncall
+      POSTGRES_PASSWORD: oncall
+      POSTGRES_DB: oncall_agent
+    ports:
+      - "5433:5432"
+    volumes:
+      - oncall-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oncall -d oncall_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  oncall-pgdata:

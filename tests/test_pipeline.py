@@ -490,3 +490,69 @@ class TestRepoRegistry:
         # Cross-repo causes are the hard part of multi-repo triage; excluding a repo
         # outright would hide them.
         assert len(registry.rank_for("server-feed")) == 2
+
+
+class TestPartialFindings:
+    """Rounds already completed found real things.
+
+    Discarding them because a later call failed throws away work the engineer can use,
+    and an incident is exactly when partial information still helps.
+    """
+
+    def _registry(self):
+        from oncall_agent.repos import Repo, RepoRegistry
+        from pathlib import Path
+
+        return RepoRegistry(repos=[Repo(name="server", path=Path("/tmp"))])
+
+    def test_model_failure_keeps_what_was_found(self):
+        from oncall_agent.investigate.loop import investigate
+        from oncall_agent.llm import LLMUnavailable
+
+        class FailsAfterOne(FakeLLM):
+            def generate_json(self, *a, **kw):
+                self.calls += 1
+                if self.calls > 1:
+                    raise LLMUnavailable("overloaded")
+                return {"tool": "search_code", "pattern": "ErrCode", "reasoning": "look"}
+
+        tools = {"search_code": lambda **kw: type("R", (), {"text": "3 matches in x.go"})()}
+        inv = investigate(FailsAfterOne([]), tools, self._registry(), "ctx", max_rounds=4)
+
+        assert inv.rounds == 1
+        assert inv.finding, "a completed round must survive a later failure"
+        assert "search_code" in inv.finding
+
+    def test_round_limit_keeps_what_was_found(self):
+        from oncall_agent.investigate.loop import investigate
+
+        llm = FakeLLM([{"tool": "search_code", "pattern": "x", "reasoning": "look"}] * 10)
+        tools = {"search_code": lambda **kw: type("R", (), {"text": "hit"})()}
+
+        inv = investigate(llm, tools, self._registry(), "ctx", max_rounds=2)
+        assert "round limit" in inv.stopped_because
+        assert inv.finding
+
+    def test_partial_finding_does_not_invent_a_cause(self):
+        from oncall_agent.investigate.loop import investigate
+        from oncall_agent.llm import LLMUnavailable
+
+        class Failing(FakeLLM):
+            def generate_json(self, *a, **kw):
+                self.calls += 1
+                if self.calls > 1:
+                    raise LLMUnavailable("overloaded")
+                return {"tool": "search_code", "pattern": "x", "reasoning": "look"}
+
+        tools = {"search_code": lambda **kw: type("R", (), {"text": "no matches"})()}
+        inv = investigate(Failing([]), tools, self._registry(), "ctx", max_rounds=4)
+
+        # Stopping early means it did not get there; a cause stated here would be made up.
+        assert "did not reach a conclusion" in inv.finding
+
+    def test_explicit_conclusion_is_not_overwritten(self):
+        from oncall_agent.investigate.loop import investigate
+
+        llm = FakeLLM([{"tool": "conclude", "finding": "root cause is X", "reasoning": "done"}])
+        inv = investigate(llm, {}, self._registry(), "ctx", max_rounds=4)
+        assert inv.finding == "root cause is X"

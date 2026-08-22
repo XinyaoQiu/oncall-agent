@@ -152,6 +152,8 @@ def investigate(
         elapsed = time.monotonic() - started
         if elapsed > wall_clock_seconds:
             inv.stopped_because = f"wall-clock budget ({wall_clock_seconds:.0f}s) reached"
+            if inv.steps and not inv.finding:
+                inv.finding = _summarize_steps(inv)
             break
 
         prompt = _build_prompt(context, registry, inv, round_no, max_rounds)
@@ -159,6 +161,10 @@ def investigate(
             action = llm.generate_json(prompt, _ACTION_SCHEMA, system=SYSTEM_PROMPT)
         except LLMUnavailable as exc:
             inv.stopped_because = f"model unavailable: {exc}"
+            # Rounds already completed found real things. Discarding them because the
+            # next call failed throws away work the engineer could still use.
+            if inv.steps:
+                inv.finding = _summarize_steps(inv)
             break
 
         tool = action.get("tool", "conclude")
@@ -215,8 +221,28 @@ def investigate(
             on_step(step)
     else:
         inv.stopped_because = f"round limit ({max_rounds}) reached"
+        if inv.steps and not inv.finding:
+            inv.finding = _summarize_steps(inv)
 
     return inv
+
+
+def _summarize_steps(inv: "Investigation") -> str:
+    """A factual account of what was searched, for when no conclusion was reached.
+
+    Deliberately not a guess at the cause: the loop stopped early precisely because it
+    had not got there, and inventing one here would be the failure mode the whole
+    design guards against. Where it looked is still worth knowing.
+    """
+    lines = ["Investigation did not reach a conclusion. What was checked:"]
+    for step in inv.steps:
+        target = next(
+            (v for k, v in step.args.items() if k in ("pattern", "path", "expr", "repo")),
+            "",
+        )
+        first_line = (step.observation or "").splitlines()[0][:120] if step.observation else ""
+        lines.append(f"- {step.tool} {target}: {first_line}")
+    return "\n".join(lines)
 
 
 def _build_prompt(

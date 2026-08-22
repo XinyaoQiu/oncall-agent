@@ -58,6 +58,7 @@ Environment:
 | `SLACK_APP_TOKEN` | for Slack | `xapp-…`, Socket Mode |
 | `KNOWLEDGE_REPO` | no | Path to a `rec-knowledge` clone |
 | `REPO_ROOT` | no | Directory holding the repos to search (default `~/Project`) |
+| `DATABASE_URL` | no | Postgres for run records; without it nothing is recorded |
 | `GRAFANA_URL` / `GRAFANA_TOKEN` | no | Real metrics; sample data is used without them |
 | `USE_SAMPLE_METRICS` | no | Force sample data |
 
@@ -75,7 +76,25 @@ uv run oncall-agent search "cold start"
 
 # Run the Slack bot
 uv run oncall-agent serve
+
+# Run records (needs DATABASE_URL)
+docker compose up -d
+uv run oncall-agent runs                 # recent invocations
+uv run oncall-agent replay 12            # every round of one investigation
+uv run oncall-agent verdict 12 wrong --note "was actually a DNS failure"
+uv run oncall-agent stats --days 30
 ```
+
+### Run records
+
+Every invocation is stored: which queries ran, what each investigation round did, what
+was concluded and at what confidence. This is separate from `rec-knowledge`, which holds
+reviewed conclusions the agent retrieves during triage — runs are never retrieved, since
+burying one useful entry under every attempt to find it is how a knowledge base degrades.
+
+`verdict` is how accuracy gets measured rather than assumed. Unreviewed runs count as
+unreviewed, never as correct: otherwise the false-confidence rate improves whenever
+nobody is checking.
 
 In Slack:
 

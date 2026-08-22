@@ -1,5 +1,8 @@
 """The triage pipeline, from Slack text to a diagnosis."""
 
+import logging
+import time
+
 from .alerts import get_alert
 from .config import Settings
 from .llm import LLMClient
@@ -10,6 +13,9 @@ from .sources.knowledge import KnowledgeRepo
 from .analysis import diagnose, evidence, identify, thread
 from .investigate.loop import investigate
 from .investigate.tools import build_toolset
+from .storage.records import open_store
+
+log = logging.getLogger(__name__)
 
 
 def _knowledge_terms(
@@ -46,6 +52,9 @@ def triage(
     llm: LLMClient | None = None,
     deep: bool = True,
     on_step=None,
+    source: str = "cli",
+    channel: str | None = None,
+    thread_ts: str | None = None,
 ) -> TriageResult:
     """Run the full pipeline.
 
@@ -55,6 +64,8 @@ def triage(
     settings = settings or Settings.from_env()
     llm = llm or LLMClient(settings)
     messages = messages or []
+    started = time.monotonic()
+    captured_steps: list = []
 
     identity = identify.identify(text, llm)
     priors = thread.extract_priors(messages, llm)
@@ -87,15 +98,29 @@ def triage(
         thread_priors=priors,
     )
 
+    def capture(step):
+        captured_steps.append(step)
+        if on_step:
+            on_step(step)
+
     if deep and settings.investigation_rounds > 0:
         result.investigation = _investigate(
-            llm, settings, grafana, identity, rule, deployment, question, on_step
+            llm, settings, grafana, identity, rule, deployment, question, capture
         )
 
     result.diagnosis = diagnose.diagnose(
         llm, identity, rule, deployment, metrics, hits, benign, priors, question,
         investigation=result.investigation,
     )
+
+    # Recording is telemetry: a failure here must never take down a triage reply.
+    if store := open_store(settings.database_url):
+        store.record(
+            result, source=source, channel=channel, thread_ts=thread_ts,
+            question=question, steps=captured_steps,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+
     return result
 
 
@@ -129,8 +154,11 @@ def _investigate(
             wall_clock_seconds=settings.investigation_seconds,
             on_step=on_step,
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        # Swallowing this silently is how a loop that never ran looks like a loop that
+        # found nothing — the run is recorded with 0 rounds and no reason why.
+        log.warning("investigation failed: %s", exc, exc_info=True)
+        return InvestigationSummary(rounds=0, stopped_because=f"failed: {exc}")
 
     return InvestigationSummary(
         rounds=inv.rounds,

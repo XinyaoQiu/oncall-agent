@@ -79,6 +79,7 @@ def build_app(settings: Settings) -> App:
             result = triage(
                 alert_text, messages, question=request or None,
                 settings=settings, on_step=on_step,
+                source="slack", channel=channel, thread_ts=thread_ts,
             )
         except LLMUnavailable as exc:
             say(text=f":warning: I can't analyze this right now — {exc}", thread_ts=thread_ts)
