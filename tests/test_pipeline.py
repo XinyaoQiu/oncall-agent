@@ -317,3 +317,60 @@ class TestTierFallback:
         assert _is_transient(Exception("429 RESOURCE_EXHAUSTED"))
         assert not _is_transient(Exception("404 NOT_FOUND"))
         assert not _is_transient(Exception("401 UNAUTHENTICATED"))
+
+
+class TestKnowledgeTerms:
+    def test_terms_include_the_resolved_deployment(self, sample_grafana):
+        from oncall_agent.pipeline import _knowledge_terms
+
+        identity = identify(CHANNEL_ALERT, llm=None)
+        rule = evidence.fetch_rule(sample_grafana, identity)
+        deployment = evidence.resolve_service(identity, rule)
+
+        terms = _knowledge_terms(identity.alert_name, identity.labels, deployment)
+        # Resolved from the rule expression, so a label-only search would miss the
+        # history of the very service that is alerting.
+        assert "server-feed" in terms
+        assert "api.newsbreak.com" in terms
+
+    def test_terms_are_deduplicated(self, sample_grafana):
+        from oncall_agent.pipeline import _knowledge_terms
+
+        identity = identify(CHANNEL_ALERT, llm=None)
+        rule = evidence.fetch_rule(sample_grafana, identity)
+        deployment = evidence.resolve_service(identity, rule)
+
+        terms = _knowledge_terms(identity.alert_name, identity.labels, deployment)
+        assert len(terms) == len(set(terms))
+
+
+class TestMetricAccounting:
+    """Queries issued, queries with data, and series found are three numbers.
+
+    Reporting only the first reads as "we looked and it's fine" when nothing came back.
+    """
+
+    def test_empty_queries_are_reported_as_empty(self):
+        from oncall_agent.models import TriageResult
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            metrics=[
+                MetricResult(query="a", series=[MetricSeries(labels={}, points=[(0, 1.0)])]),
+                MetricResult(query="b", series=[]),
+            ],
+        )
+        reply = format_reply(result)
+        assert "2 queries" in reply
+        assert "1 empty" in reply
+
+    def test_failed_queries_are_reported_separately(self):
+        from oncall_agent.models import TriageResult
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            metrics=[MetricResult(query="a", error="timeout")],
+        )
+        assert "1 failed" in format_reply(result)

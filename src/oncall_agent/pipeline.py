@@ -9,13 +9,29 @@ from .sources.knowledge import KnowledgeRepo
 from .analysis import diagnose, evidence, identify, thread
 
 
-def _knowledge_terms(alert_name: str, labels: dict[str, str]) -> list[str]:
+def _knowledge_terms(
+    alert_name: str, labels: dict[str, str], deployment=None
+) -> list[str]:
     known = get_alert(alert_name)
     terms = list(known.knowledge_terms) if known else []
+
     for key in ("app", "deployment", "service", "host"):
         if value := labels.get(key):
             terms.append(value)
-    return terms
+
+    # The deployment is often resolved from the rule expression rather than from the
+    # rendered alert labels, so searching labels alone misses history about the very
+    # service that is alerting.
+    if deployment:
+        terms.append(deployment.app_label)
+        terms.extend(deployment.hosts)
+
+    seen, unique = set(), []
+    for term in terms:
+        if term and term not in seen:
+            seen.add(term)
+            unique.append(term)
+    return unique
 
 
 def triage(
@@ -50,7 +66,9 @@ def triage(
     try:
         repo = KnowledgeRepo(settings.knowledge_repo)
         repo.pull()
-        hits = repo.search_many(_knowledge_terms(identity.alert_name, identity.labels))
+        hits = repo.search_many(
+            _knowledge_terms(identity.alert_name, identity.labels, deployment)
+        )
     except Exception:
         # Knowledge is context, not a gate. Its absence weakens the diagnosis but the
         # model is told what it has, so it can lower confidence accordingly.
@@ -114,10 +132,21 @@ def format_reply(result: TriageResult) -> str:
         )
 
     if result.metrics:
-        queried = [m for m in result.metrics if not m.error]
-        lines += ["", f"_Queried {len(queried)} metric series"]
+        # Queries issued, queries that returned data, and series found are three
+        # different numbers. Reporting only the first reads as "we looked and it's
+        # fine" when in fact nothing came back.
+        with_data = [m for m in result.metrics if m.series]
+        failed = [m for m in result.metrics if m.error]
+
+        parts = [f"{len(result.metrics)} queries"]
+        parts.append(f"{sum(len(m.series) for m in with_data)} series")
+        if len(with_data) < len(result.metrics) - len(failed):
+            parts.append(f"{len(result.metrics) - len(failed) - len(with_data)} empty")
+        if failed:
+            parts.append(f"{len(failed)} failed")
         if result.knowledge_hits:
-            lines[-1] += f", {len(result.knowledge_hits)} knowledge hits"
-        lines[-1] += "_"
+            parts.append(f"{len(result.knowledge_hits)} knowledge hits")
+
+        lines += ["", f"_{', '.join(parts)}_"]
 
     return "\n".join(lines)

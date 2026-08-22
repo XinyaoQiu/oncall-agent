@@ -151,11 +151,12 @@ def diagnose(
     system = SYSTEM_PROMPT
     if any(m.source == "sample" for m in metrics):
         system += (
-            "\nThe metric figures in this request are synthetic test fixtures, not "
-            "measurements of any real system. Treat every one of them as unknown: draw "
-            "no conclusions from them, cite none of them, and keep confidence low. State "
-            "plainly that live metrics are unavailable, without describing this request "
-            "or its structure.\n"
+            "\nNo metrics backend is connected, so the figures here are synthetic and "
+            "none of them measure anything real. Draw no conclusions from their values "
+            "and keep confidence low. Do still say which measurements were attempted and "
+            "which ones a real answer would need, naming them concretely — that is the "
+            "useful part of the reply when the numbers are absent. Never describe this "
+            "request or its structure.\n"
         )
 
     result = llm.generate_json(prompt, _DIAGNOSIS_SCHEMA, deep=True, system=system)
