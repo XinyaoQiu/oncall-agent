@@ -13,6 +13,7 @@ from .sources.knowledge import KnowledgeRepo
 from .analysis import diagnose, evidence, identify, thread
 from .investigate.loop import investigate
 from .investigate.tools import build_toolset
+from .memory import summarize as summarize_thread
 from .storage.records import open_store
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,13 @@ def triage(
     started = time.monotonic()
     captured_steps: list = []
 
+    # Open the store once: the same handle reads this thread's earlier turns and writes
+    # this one.
+    store = open_store(settings.database_url)
+    prior = ""
+    if store and thread_ts:
+        prior = summarize_thread(store.thread_history(thread_ts))
+
     identity = identify.identify(text, llm)
     priors = thread.extract_priors(messages, llm)
 
@@ -105,16 +113,16 @@ def triage(
 
     if deep and settings.investigation_rounds > 0:
         result.investigation = _investigate(
-            llm, settings, grafana, identity, rule, deployment, question, capture
+            llm, settings, grafana, identity, rule, deployment, question, capture, prior
         )
 
     result.diagnosis = diagnose.diagnose(
         llm, identity, rule, deployment, metrics, hits, benign, priors, question,
-        investigation=result.investigation,
+        investigation=result.investigation, prior=prior,
     )
 
     # Recording is telemetry: a failure here must never take down a triage reply.
-    if store := open_store(settings.database_url):
+    if store:
         store.record(
             result, source=source, channel=channel, thread_ts=thread_ts,
             question=question, steps=captured_steps,
@@ -125,7 +133,7 @@ def triage(
 
 
 def _investigate(
-    llm, settings, grafana, identity, rule, deployment, question, on_step
+    llm, settings, grafana, identity, rule, deployment, question, on_step, prior=""
 ) -> InvestigationSummary | None:
     """Run the search loop, letting the diagnosis proceed if it fails.
 
@@ -146,6 +154,8 @@ def _investigate(
         lines.append(f"Served by {deployment.app_label} ({', '.join(deployment.hosts)}).")
     if question:
         lines.append(f"The engineer asked: {question}")
+    if prior:
+        lines.append(f"\n{prior}")
 
     try:
         inv = investigate(

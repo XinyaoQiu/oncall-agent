@@ -178,6 +178,44 @@ class RecordStore:
             log.warning("replay failed: %s", exc)
             return None
 
+    def thread_history(self, thread_ts: str, limit: int = 5) -> list[dict]:
+        """Earlier investigations in this Slack thread, oldest first.
+
+        A thread is a conversation: the second mention is usually a follow-up to the
+        first, and re-deriving what was already established wastes the engineer's time
+        and the budget. The rows are already here for evaluation; this reads them back.
+        """
+        if not self._available:
+            return []
+        try:
+            with self._connect() as conn:
+                runs = conn.execute(
+                    """
+                    SELECT id, created_at, alert_name, confidence, diagnosis,
+                           investigation_rounds, stopped_because
+                      FROM invocations
+                     WHERE thread_ts = %s
+                     ORDER BY created_at DESC
+                     LIMIT %s
+                    """,
+                    (thread_ts, limit),
+                ).fetchall()
+
+                for run in runs:
+                    run["steps"] = conn.execute(
+                        """
+                        SELECT tool, args, observation
+                          FROM investigation_steps
+                         WHERE invocation_id = %s
+                         ORDER BY round
+                        """,
+                        (run["id"],),
+                    ).fetchall()
+                return list(reversed(runs))
+        except Exception as exc:
+            log.warning("thread history lookup failed: %s", exc)
+            return []
+
     def stats(self, days: int = 30) -> dict:
         """The numbers §9 asks for.
 

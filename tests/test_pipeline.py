@@ -556,3 +556,58 @@ class TestPartialFindings:
         llm = FakeLLM([{"tool": "conclude", "finding": "root cause is X", "reasoning": "done"}])
         inv = investigate(llm, {}, self._registry(), "ctx", max_rounds=4)
         assert inv.finding == "root cause is X"
+
+
+class TestThreadMemory:
+    """A Slack thread is a conversation.
+
+    The second mention is almost always a follow-up, and an agent that re-derives
+    everything each time wastes the engineer's time and its own budget. Measured: a
+    follow-up went from 5 rounds to 1 once the earlier turn was in context.
+    """
+
+    def test_first_turn_has_nothing_to_build_on(self):
+        from oncall_agent.memory import summarize
+
+        assert summarize([]) == ""
+
+    def test_prior_conclusion_is_carried_forward(self):
+        from oncall_agent.memory import summarize
+
+        text = summarize([{
+            "alert_name": "get-empty-docids",
+            "confidence": "low",
+            "diagnosis": {"likely_cause": "ranking recall returned nothing"},
+            "steps": [],
+        }])
+        assert "ranking recall returned nothing" in text
+        assert "low confidence" in text
+
+    def test_what_was_searched_is_carried_too(self):
+        """Repeating a search that already came back empty is the usual way a
+        follow-up wastes a round."""
+        from oncall_agent.memory import summarize
+
+        text = summarize([{
+            "alert_name": "get-empty-docids",
+            "diagnosis": None,
+            "steps": [
+                {"tool": "search_code", "args": {"pattern": "docid"},
+                 "observation": "5 matches in 2 files"},
+            ],
+        }])
+        assert "search_code docid" in text
+        assert "already checked" in text
+
+    def test_prior_steps_are_bounded(self):
+        from oncall_agent.memory import MAX_PRIOR_STEPS, summarize
+
+        text = summarize([{
+            "alert_name": "a",
+            "diagnosis": None,
+            "steps": [
+                {"tool": "search_code", "args": {"pattern": f"p{i}"}, "observation": "x"}
+                for i in range(30)
+            ],
+        }])
+        assert text.count("search_code") <= MAX_PRIOR_STEPS

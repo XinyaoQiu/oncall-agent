@@ -67,6 +67,7 @@ def build_prompt(
     priors: list[str],
     question: str | None = None,
     investigation=None,
+    prior: str = "",
 ) -> str:
     now = datetime.now()
     sections = [
@@ -118,6 +119,9 @@ def build_prompt(
             + "\n".join(f"- {p}" for p in priors)
         )
 
+    if prior:
+        sections.append(f"\n# Earlier in this thread\n{prior}")
+
     if investigation and investigation.finding:
         sections.append(
             f"\n# Code investigation ({investigation.rounds} rounds, "
@@ -148,9 +152,11 @@ def diagnose(
     priors: list[str],
     question: str | None = None,
     investigation=None,
+    prior: str = "",
 ) -> Diagnosis:
     prompt = build_prompt(
-        identity, rule, deployment, metrics, knowledge, benign, priors, question, investigation
+        identity, rule, deployment, metrics, knowledge, benign, priors, question,
+        investigation, prior,
     )
 
     # Kept out of the prompt body: anything placed among the evidence gets cited as

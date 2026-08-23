@@ -3,6 +3,11 @@
 -- Distinct from rec-knowledge, which holds reviewed conclusions that the agent
 -- retrieves. Nothing here is ever retrieved during triage — mixing runs into the
 -- knowledge base would bury the one useful entry under every attempt to find it.
+--
+-- These rows are raw traces with no authority. What a run established reaches the
+-- knowledge base only as a candidate entry in a PR (tech design §7.1), where a human
+-- merging it is what makes it authoritative. The path out of this table is review,
+-- never retrieval.
 
 CREATE TABLE IF NOT EXISTS invocations (
     id              BIGSERIAL PRIMARY KEY,
