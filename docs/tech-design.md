@@ -252,6 +252,10 @@ independently gathered. Prior information reorders work; it never removes it.
 The @-mention itself is also a signal: a person has read the alert and decided help is
 wanted. That is a better trigger than firing on every alert (§12).
 
+This section covers what *people* said in the thread. What the agent itself established
+on an earlier mention is a separate input, covered in §3.7 — for a while it was not an
+input at all, which made every follow-up start from nothing.
+
 ### 3.4 The mention text is an input, not just a trigger
 
 What the engineer types when summoning the agent — "find the root cause and production
@@ -380,6 +384,42 @@ disagree.
 
 ---
 
+
+### 3.7 The thread is a conversation, not a series of first contacts
+
+A thread rarely contains one mention. The engineer asks something, reads the reply, and
+asks a follow-up — "what about server-feed's CPU", "which file emits that metric". Each
+of those only makes sense against the answer before it.
+
+An earlier version of this design treated every mention as a fresh start. §3.3 covered
+what *people* had said in the thread but nothing about what the agent itself had already
+done, so a follow-up re-identified the alert, re-queried the same metrics, and re-ran
+searches that had already come back empty. Measured on a two-turn thread: the follow-up
+spent five rounds re-establishing what the first turn had already found. With the earlier
+turn in context it took one.
+
+**The data already existed.** Every run writes to `invocations` and `investigation_steps`
+(§5.3) for evaluation. Short-term memory is those rows read back, keyed by `thread_ts` —
+no new storage, and nothing retained that was not already retained. The defect was never
+missing data; it was written and never read.
+
+What is carried forward:
+
+| Carried | Why |
+|---|---|
+| The previous conclusion and its confidence | The follow-up is usually about that conclusion |
+| Which searches ran, and the first line each returned | Repeating a search that came back empty is the commonest way a follow-up wastes a round |
+
+Bounded to the last few turns and the first several steps of each: a thread that runs all
+afternoon must not grow the prompt without limit.
+
+**Long-term memory is deliberately absent.** Across incidents, `rec-knowledge` already
+holds what was learned, and holds it behind human review (§7). A second store of
+remembered conclusions would compete with it, would not be reviewed, and would go stale
+in exactly the silent way §7.3 describes. What deserves to outlive an incident goes
+through a PR, rather than accumulating as a side effect of having been asked.
+
+---
 
 ## 4. Service and code localization
 
