@@ -6,6 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from .config import Resolution
+
 
 class Confidence(str, Enum):
     HIGH = "high"
@@ -74,6 +76,11 @@ class MetricResult(BaseModel):
     source: str = "grafana"
     error: str | None = None
 
+    # Why this result may not mean what it appears to — a workload resolved by guess,
+    # a name queried straight from the alert text. Travels with the number so it cannot
+    # be read without it.
+    caveat: str = ""
+
     @property
     def is_empty(self) -> bool:
         return not self.series
@@ -89,14 +96,15 @@ class MetricResult(BaseModel):
 
     def summarize(self, limit: int = 5, *, now: float | None = None) -> str:
         """Compact text form for the prompt."""
+        prefix = f"  ⚠ {self.caveat}\n" if self.caveat else ""
         if self.error:
-            return f"query failed: {self.error}"
+            return f"{prefix}query failed: {self.error}"
         if self.is_empty:
             # An empty result is not evidence of health.
-            return "no data returned (this is not the same as 'healthy')"
+            return prefix + "no data returned (this is not the same as 'healthy')"
 
         reference = now if now is not None else time.time()
-        lines = []
+        lines = [f"  ⚠ {self.caveat}"] if self.caveat else []
         for s in self.series[:limit]:
             label_str = ", ".join(f"{k}={v}" for k, v in s.labels.items())
             lines.append(f"  {{{label_str}}} {self._describe(s, reference)}")
@@ -160,6 +168,7 @@ class TriageResult(BaseModel):
 
     identity: AlertIdentity
     rule: AlertRule | None = None
+    resolution: "Resolution | None" = None
     metrics: list[MetricResult] = Field(default_factory=list)
     knowledge_hits: list[KnowledgeHit] = Field(default_factory=list)
     diagnosis: Diagnosis | None = None

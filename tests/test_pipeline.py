@@ -5,8 +5,14 @@ import pytest
 from oncall_agent.alerts import get_alert, match_alert
 from oncall_agent.analysis import evidence
 from oncall_agent.analysis.identify import extract_labels, identify
-from oncall_agent.config import Settings, resolve_blast_radius, resolve_deployment
-from oncall_agent.models import AlertIdentity, MetricResult, MetricSeries
+from oncall_agent.analysis import diagnose
+from oncall_agent.config import (
+    Settings,
+    resolve,
+    resolve_blast_radius,
+    resolve_deployment,
+)
+from oncall_agent.models import AlertIdentity, MetricResult, MetricSeries, TriageResult
 from oncall_agent.sources.grafana import GrafanaClient
 
 CHANNEL_ALERT = """[FIRING] news-list-for-channel p99 latency
@@ -51,6 +57,106 @@ class TestDeploymentResolution:
     def test_blast_radius_is_the_inverse(self):
         deployments = resolve_blast_radius("server/router/feed.go")
         assert [d.app_label for d in deployments] == ["server-feed"]
+
+
+class TestResolutionConfidence:
+    """A guess must never be returned looking like a match.
+
+    The failure this guards against is silent: the catch-all returns a real deployment,
+    its pod and replica queries succeed, and the pack describes the wrong workload in
+    exactly the format it would use for the right one.
+    """
+
+    def test_unknown_host_resolves_to_nothing(self):
+        r = resolve(host="foo.example.com")
+        assert r.deployment is None
+        assert r.confidence == "unresolved"
+
+    def test_unknown_host_with_path_resolves_to_nothing(self):
+        r = resolve(host="foo.example.com", path="/x")
+        assert r.deployment is None
+
+    def test_unknown_path_is_flagged_not_trusted(self):
+        r = resolve(host="api.newsbreak.com", path="/api/v2/charge")
+        # The catch-all still answers — dropping it would empty the pack — but it says so.
+        assert r.deployment.app_label == "server-default"
+        assert r.confidence == "low"
+        assert r.matched_by == "catch-all"
+        assert not r.is_confident
+
+    def test_host_without_path_is_a_guess(self):
+        r = resolve(host="api.newsbreak.com")
+        assert r.confidence == "low"
+        assert r.matched_by == "host-only"
+
+    def test_real_prefix_match_is_exact(self):
+        r = resolve(host="api.newsbreak.com", path="/Website/channel/news-list")
+        assert r.deployment.app_label == "server-feed"
+        assert r.is_confident
+
+    def test_unknown_app_label_does_not_fall_back(self):
+        r = resolve(app_label="billing-svc")
+        assert r.deployment is None
+        assert "billing-svc" in r.note
+
+    def test_nothing_to_go_on(self):
+        assert resolve().confidence == "unresolved"
+
+    def test_legacy_helper_still_returns_a_deployment(self):
+        assert resolve_deployment(
+            host="api.newsbreak.com", path="/Website/channel/x"
+        ).app_label == "server-feed"
+
+
+class TestUnconfirmedAttributionIsVisible:
+    def test_prompt_marks_a_guessed_workload(self, sample_grafana):
+        identity = AlertIdentity(alert_name="large-scale-5xx", labels={"host": "api.newsbreak.com"})
+        resolution = resolve(host="api.newsbreak.com")
+        prompt = diagnose.build_prompt(
+            identity, None, resolution, [], [], [], []
+        )
+        assert "UNCONFIRMED" in prompt
+
+    def test_prompt_says_so_when_nothing_resolved(self):
+        identity = AlertIdentity(alert_name="unknown", labels={})
+        resolution = resolve(host="foo.example.com")
+        prompt = diagnose.build_prompt(identity, None, resolution, [], [], [], [])
+        assert "Unresolved" in prompt
+
+    def test_exact_match_carries_no_warning(self):
+        identity = AlertIdentity(alert_name="news-list-for-channel-p99", labels={})
+        resolution = resolve(host="api.newsbreak.com", path="/Website/channel/x")
+        prompt = diagnose.build_prompt(identity, None, resolution, [], [], [], [])
+        assert "UNCONFIRMED" not in prompt
+
+    def test_reply_warns_on_a_guessed_workload(self):
+        from oncall_agent.pipeline import format_reply
+
+        result = TriageResult(
+            identity=AlertIdentity(alert_name="large-scale-5xx"),
+            resolution=resolve(host="api.newsbreak.com"),
+        )
+        assert "attribution unconfirmed" in format_reply(result).lower()
+
+    def test_metric_caveat_rides_with_the_number(self, sample_grafana):
+        identity = AlertIdentity(alert_name="large-scale-5xx", labels={"host": "api.newsbreak.com"})
+        resolution = resolve(host="api.newsbreak.com")
+        metrics = evidence.gather(sample_grafana, identity, None, resolution)
+        workload = [m for m in metrics if "kube_" in m.query]
+        assert workload, "workload probes should still run on a guess"
+        assert all(m.caveat for m in workload)
+        assert "⚠" in workload[0].summarize()
+
+
+class TestUnresolvedStillInvestigates:
+    """§1.1: an unresolved deployment drops workload-scoped probes, not the whole pack."""
+
+    def test_named_app_is_queried_even_when_not_in_the_table(self, sample_grafana):
+        identity = AlertIdentity(alert_name="unknown", labels={"app": "billing-svc"})
+        metrics = evidence.gather(sample_grafana, identity, None, resolve(app_label="billing-svc"))
+        assert metrics, "a named workload must still be probed"
+        assert any("billing-svc" in m.query for m in metrics)
+        assert all(m.caveat for m in metrics if "billing-svc" in m.query)
 
 
 class TestEvidence:

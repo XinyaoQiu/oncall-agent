@@ -4,7 +4,7 @@ import logging
 import time
 
 from .alerts import get_alert
-from .config import Settings
+from .config import Resolution, Settings
 from .llm import LLMClient
 from .models import InvestigationSummary, ThreadMessage, TriageResult
 from .repos import default_registry
@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 def _knowledge_terms(
-    alert_name: str, labels: dict[str, str], deployment=None
+    alert_name: str, labels: dict[str, str], deployment=None, confident: bool = True
 ) -> list[str]:
     known = get_alert(alert_name)
     terms = list(known.knowledge_terms) if known else []
@@ -32,9 +32,15 @@ def _knowledge_terms(
     # The deployment is often resolved from the rule expression rather than from the
     # rendered alert labels, so searching labels alone misses history about the very
     # service that is alerting.
+    if isinstance(deployment, Resolution):
+        confident = deployment.is_confident
+        deployment = deployment.deployment
     if deployment:
         terms.append(deployment.app_label)
-        terms.extend(deployment.hosts)
+        if confident:
+            # A guessed workload's hosts would pull in history about a service that may
+            # have nothing to do with this alert.
+            terms.extend(deployment.hosts)
 
     seen, unique = set(), []
     for term in terms:
@@ -80,9 +86,10 @@ def triage(
 
     grafana = GrafanaClient(settings)
     rule = evidence.fetch_rule(grafana, identity)
-    deployment = evidence.resolve_service(identity, rule)
+    resolution = evidence.resolve_service(identity, rule)
+    deployment = resolution.deployment
     metrics = evidence.gather(
-        grafana, identity, rule, deployment, minutes=settings.query_window_minutes
+        grafana, identity, rule, resolution, minutes=settings.query_window_minutes
     )
     benign = evidence.benign_checks(identity)
 
@@ -91,7 +98,9 @@ def triage(
         repo = KnowledgeRepo(settings.knowledge_repo)
         repo.pull()
         hits = repo.search_many(
-            _knowledge_terms(identity.alert_name, identity.labels, deployment)
+            _knowledge_terms(
+                identity.alert_name, identity.labels, deployment, resolution.is_confident
+            )
         )
     except Exception:
         # Knowledge is context, not a gate. Its absence weakens the diagnosis but the
@@ -101,6 +110,7 @@ def triage(
     result = TriageResult(
         identity=identity,
         rule=rule,
+        resolution=resolution,
         metrics=metrics,
         knowledge_hits=hits,
         thread_priors=priors,
@@ -113,11 +123,11 @@ def triage(
 
     if deep and settings.investigation_rounds > 0:
         result.investigation = _investigate(
-            llm, settings, grafana, identity, rule, deployment, question, capture, prior
+            llm, settings, grafana, identity, rule, resolution, question, capture, prior
         )
 
     result.diagnosis = diagnose.diagnose(
-        llm, identity, rule, deployment, metrics, hits, benign, priors, question,
+        llm, identity, rule, resolution, metrics, hits, benign, priors, question,
         investigation=result.investigation, prior=prior,
     )
 
@@ -133,7 +143,7 @@ def triage(
 
 
 def _investigate(
-    llm, settings, grafana, identity, rule, deployment, question, on_step, prior=""
+    llm, settings, grafana, identity, rule, resolution, question, on_step, prior=""
 ) -> InvestigationSummary | None:
     """Run the search loop, letting the diagnosis proceed if it fails.
 
@@ -145,13 +155,18 @@ def _investigate(
     if not registry.available():
         return None
 
+    deployment = resolution.deployment if resolution is not None else None
+
     lines = [f"Alert {identity.alert_name} firing."]
     if identity.labels:
         lines.append("Labels: " + ", ".join(f"{k}={v}" for k, v in identity.labels.items()))
     if rule:
         lines.append(f"Rule: {rule.expression}")
     if deployment:
-        lines.append(f"Served by {deployment.app_label} ({', '.join(deployment.hosts)}).")
+        served = f"Served by {deployment.app_label} ({', '.join(deployment.hosts)})."
+        if resolution is not None and not resolution.is_confident:
+            served += f" (unconfirmed: {resolution.note})"
+        lines.append(served)
     if question:
         lines.append(f"The engineer asked: {question}")
     if prior:
@@ -219,6 +234,22 @@ def format_reply(result: TriageResult) -> str:
             1,
             f":warning: _Answered by {d.model} — the usual model was overloaded. "
             "Analysis may be shallower than normal._",
+        )
+
+    res = result.resolution
+    if res is not None and res.confidence == "low" and res.deployment:
+        # Same reasoning as the sample-data banner: the reader cannot tell a guessed
+        # attribution from a confirmed one by looking at the figures.
+        lines.insert(
+            1,
+            f":warning: *Service attribution unconfirmed* — {res.note}. "
+            f"Workload figures below assume `{res.deployment.app_label}`.",
+        )
+    elif res is not None and res.confidence == "unresolved" and res.note:
+        lines.insert(
+            1,
+            f":warning: *No deployment resolved* — {res.note}. "
+            "Nothing below is scoped to a workload.",
         )
 
     if any(m.source == "sample" for m in result.metrics):

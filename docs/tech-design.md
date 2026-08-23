@@ -465,6 +465,21 @@ pack and the prompt both show that flag.
 need a workload identity and keeps everything driven by raw labels — §3.5's label-free
 naming path. The distinction: a flagged guess is usable, an unflagged one is a trap.
 
+**Implemented.** `resolve()` returns the deployment together with `confidence`
+(`exact` / `low` / `unresolved`), `matched_by`, and a note explaining how it got there.
+Building it surfaced a worse case than the catch-all: a host in no deployment's list was
+falling back to the *entire* table and returning its first entry, so an alert on a host
+the agent had never heard of resolved confidently to `server-default`. That path now
+returns unresolved.
+
+Low confidence does not suppress the workload probes — they run, each carrying the caveat
+in the same string as the number, so a reader cannot take the figure without it. The flag
+reaches the prompt (a `# Deployment (UNCONFIRMED)` heading rather than a footnote), the
+Slack reply (a banner beside the sample-data one), and the run record, where a guessed
+attribution is stored as `server-default?` so runs that knew and runs that guessed do not
+aggregate into one number. When the table has nothing but the alert named a workload, that
+name is queried directly — an unverified selector beats no measurement.
+
 ### 4.2 Code search — agentic, lexical-first
 
 For code, retrieval is lexical (ripgrep) plus agentic iteration:

@@ -71,6 +71,28 @@ def _hosts_in(expr: str) -> set[str]:
     return set(match.group(1).split("|")) if match else set()
 
 
+def _workload_in(expr: str) -> str | None:
+    """The workload a kube_* selector names, if any."""
+    match = re.search(r'(?:deployment|pod)=~?"([^"]+)"', expr)
+    return match.group(1).rstrip("-.*") if match else None
+
+
+def _matching_workload(result: MetricResult, wanted: str | None) -> MetricResult:
+    """Drop series belonging to a workload the selector did not ask for.
+
+    Fixtures that answer regardless of their own selector would teach the reader that
+    scoping does not matter — and here they would hand back another service's pods under
+    the name of the one that was queried, which is the exact failure this release fixes.
+    """
+    if not wanted:
+        return result
+    result.series = [
+        s for s in result.series
+        if any(str(v).startswith(wanted) for v in s.labels.values())
+    ]
+    return result
+
+
 def _scoped(result: MetricResult) -> MetricResult:
     """Drop series the expression's host selector excludes.
 
@@ -91,7 +113,7 @@ def query(expr: str, *, minutes: int = 60) -> MetricResult:
     if "kube_pod_start_time" in lowered:
         # Recent starts: consistent with a deploy inside the alert window.
         now = time.time()
-        return MetricResult(
+        return _matching_workload(MetricResult(
             query=expr,
             source="sample",
             series=[
@@ -104,10 +126,10 @@ def query(expr: str, *, minutes: int = 60) -> MetricResult:
                     points=[(now - 540, now - 540)],
                 ),
             ],
-        )
+        ), _workload_in(expr))
 
     if "kube_deployment_status_replicas" in lowered:
-        return MetricResult(
+        return _matching_workload(MetricResult(
             query=expr,
             source="sample",
             series=[
@@ -116,7 +138,7 @@ def query(expr: str, *, minutes: int = 60) -> MetricResult:
                     points=_oscillating(12, 8),
                 )
             ],
-        )
+        ), _workload_in(expr))
 
     if "server_api_delay_bucket" in lowered or "histogram_quantile" in lowered:
         return MetricResult(

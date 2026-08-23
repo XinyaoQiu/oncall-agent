@@ -214,6 +214,14 @@ Resolution gains an explicit confidence: a catch-all match or a host-match-witho
 returned flagged, and the flag reaches both the pack and the prompt. Unresolved is a valid
 state that drops identity-dependent probes and keeps label-driven ones.
 
+**Status: implemented.** `resolve()` returns `Resolution{deployment, confidence,
+matched_by, note}`; `resolve_deployment()` is kept as a thin wrapper for callers that only
+want the workload. Implementation found a more severe bug than the catch-all one this
+amendment described: `candidates = [...] or candidates` discarded a failed host filter, so
+an unknown host resolved to the table's first entry. Both paths now return `unresolved`.
+Covered by `TestResolutionConfidence`, `TestUnconfirmedAttributionIsVisible`, and
+`TestUnresolvedStillInvestigates`.
+
 ### 2A.5 Precedent short-circuit (tech design §6.2)
 
 A close `rec-knowledge` match is surfaced **immediately, with attribution and date**,

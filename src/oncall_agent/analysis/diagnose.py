@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from ..config import Deployment
+from ..config import Deployment, Resolution
 from ..llm import LLMClient
 from ..models import (
     AlertIdentity,
@@ -60,7 +60,7 @@ _DIAGNOSIS_SCHEMA = {
 def build_prompt(
     identity: AlertIdentity,
     rule: AlertRule | None,
-    deployment: Deployment | None,
+    deployment: Deployment | Resolution | None,
     metrics: list[MetricResult],
     knowledge: list[KnowledgeHit],
     benign: list[str],
@@ -86,13 +86,34 @@ def build_prompt(
         if rule.duration:
             sections.append(f"for: {rule.duration}")
 
-    if deployment:
+    resolution = deployment if isinstance(deployment, Resolution) else None
+    workload = resolution.deployment if resolution else deployment
+
+    if workload:
+        header = "# Deployment"
+        caveat = ""
+        if resolution and not resolution.is_confident:
+            # Stated in the heading, not buried below the numbers: a reader skimming for
+            # the app name must not pass the qualifier without seeing it.
+            header = "# Deployment (UNCONFIRMED)"
+            caveat = (
+                f"\n⚠ Attribution is a guess: {resolution.note}. Treat pod and replica "
+                "figures below as describing this workload only if that is right; they "
+                "may belong to a different one."
+            )
         sections.append(
-            f"\n# Deployment\n"
-            f"app: {deployment.app_label}\n"
-            f"pods: {deployment.pod_pattern} (~{deployment.replicas} replicas)\n"
-            f"traffic: {deployment.traffic_share}\n"
-            f"routes: {', '.join(deployment.code_route_paths)}"
+            f"\n{header}\n"
+            f"app: {workload.app_label}\n"
+            f"pods: {workload.pod_pattern} (~{workload.replicas} replicas)\n"
+            f"traffic: {workload.traffic_share}\n"
+            f"routes: {', '.join(workload.code_route_paths)}"
+            f"{caveat}"
+        )
+    elif resolution and resolution.note:
+        sections.append(
+            f"\n# Deployment\nUnresolved — {resolution.note}. "
+            "No workload-scoped figures are available; do not attribute the alert to a "
+            "service without evidence from the metrics or code below."
         )
 
     if metrics:
@@ -145,7 +166,7 @@ def diagnose(
     llm: LLMClient,
     identity: AlertIdentity,
     rule: AlertRule | None,
-    deployment: Deployment | None,
+    deployment: Deployment | Resolution | None,
     metrics: list[MetricResult],
     knowledge: list[KnowledgeHit],
     benign: list[str],

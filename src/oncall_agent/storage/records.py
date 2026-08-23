@@ -81,7 +81,7 @@ class RecordStore:
                         result.identity.alert_name,
                         result.identity.identified_by,
                         json.dumps(result.identity.labels),
-                        None,
+                        _deployment_label(result),
                         json.dumps([
                             {"query": m.query, "source": m.source,
                              "series": len(m.series), "error": m.error}
@@ -269,6 +269,17 @@ class RecordStore:
         except Exception as exc:
             log.warning("stats failed: %s", exc)
             return {}
+
+
+def _deployment_label(result) -> str | None:
+    """What the run resolved to, with its standing — 'server-feed' vs 'server-feed?'.
+
+    A run that guessed and a run that knew must not aggregate into the same number.
+    """
+    res = getattr(result, "resolution", None)
+    if res is None or not res.deployment:
+        return None
+    return res.deployment.app_label + ("" if res.is_confident else "?")
 
 
 def open_store(dsn: str | None) -> RecordStore | None:

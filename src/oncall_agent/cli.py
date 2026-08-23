@@ -79,13 +79,19 @@ def evidence(
 
     grafana = GrafanaClient(settings)
     rule = ev.fetch_rule(grafana, identity)
-    deployment = ev.resolve_service(identity, rule)
-    metrics = ev.gather(grafana, identity, rule, deployment)
+    resolution = ev.resolve_service(identity, rule)
+    metrics = ev.gather(grafana, identity, rule, resolution)
+
+    if resolution.deployment:
+        suffix = "" if resolution.is_confident else f"  (unconfirmed: {resolution.note})"
+        shown = f"{resolution.deployment.app_label}{suffix}"
+    else:
+        shown = f"- unresolved -  ({resolution.note})" if resolution.note else "- unresolved -"
 
     typer.echo(f"alert:      {identity.alert_name} (via {identity.identified_by})")
     typer.echo(f"labels:     {identity.labels or '-'}")
     typer.echo(f"rule:       {rule.expression if rule else '- not found -'}")
-    typer.echo(f"deployment: {deployment.app_label if deployment else '- unresolved -'}")
+    typer.echo(f"deployment: {shown}")
 
     for m in metrics:
         typer.echo(f"\nquery: {m.query}\n{m.summarize()}")
