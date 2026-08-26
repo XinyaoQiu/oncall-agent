@@ -7,6 +7,19 @@ Companion system: the Publisher Support Assistant (external, customer-facing). T
 share evaluation, tracing, and LLM gateway infrastructure and are isolated everywhere
 else. See §11.
 
+> **Amended 2026-08-26 — LangGraph + Slack rewrite.**
+> The orchestration described in §8 is superseded: the fixed pipeline and its hand-rolled
+> search loop become a **LangGraph Plan-Execute-Replan graph over MCP tools**, and Slack
+> becomes a first-class entry point rather than a thin trigger. §13 (new) covers the Slack
+> integration and the process model; §8 is rewritten below; §5.1 gains the tool-load
+> provenance wrapper that MCP makes necessary.
+>
+> **Everything in §1–§7 and §9–§12 stands unchanged.** Those sections are requirements, and
+> the rewrite is an implementation change. Where a requirement was previously guaranteed by
+> the shape of a function call, the spec names the new mechanism that guarantees it —
+> see the constraint → mechanism → test table in
+> [`docs/superpowers/specs/2026-08-26-langgraph-slack-rewrite.md`](superpowers/specs/2026-08-26-langgraph-slack-rewrite.md) §9.
+
 ---
 
 ## 1. Positioning — evidence pack first, diagnosis second
@@ -573,6 +586,24 @@ model never sees a bare number:
 
 Impact quantification (step 7) is hard-wired to `lb_access_logs`. The agent cannot
 override this — it's a routing decision in code, not an instruction the model may weigh.
+
+**Amended 2026-08-26 — provenance is attached where tools are loaded.** Moving to MCP makes
+this harder, not easier: the protocol has no provenance field, and a loaded MCP tool is a
+name, a description and an argument schema. A tool whose `total` is a `limit`-capped row
+count looks, to a planner asked "how many users were affected", exactly like an impact
+source.
+
+So the envelope is applied at the registry boundary rather than written by each tool
+author. `config/sources.yaml` declares per tool name: `sampling_rate`, `retention`,
+`usable_for`, `not_usable_for`, `synthetic`. Every result is wrapped before it reaches the
+model, and the caveat renders in the same string as the number.
+
+Two rules make that hold under change:
+
+- **Default deny.** A tool absent from the registry is `usable_for: [qualitative]` and
+  never `impact_quantification`. Adding an MCP server cannot silently add an impact source.
+- **Impact is not a routed tool at all.** `quantify_impact()` is local and has no `source`
+  parameter. Counting impact from a sampled log is not forbidden — it is inexpressible.
 A model that reports a 7×-understated user-impact number in an incident review is worse
 than one that declines to answer.
 
@@ -972,38 +1003,70 @@ as §6.2 — say where a belief came from, and a person can evaluate it in one s
 
 ## 8. Orchestration and budgets
 
+**Rewritten 2026-08-26.** The fan-out below used to be a fixed sequence in a routing
+function with one agentic sub-loop inside it. It is now a LangGraph `StateGraph`. The
+change is real — the model now plans, and can re-plan when a result invalidates its plan —
+but the *deterministic floor is not part of what it plans*.
+
 ```
-Alert
+inbound turn  (Slack mention / DM, HTTP, or CLI)
  ▼
-Stage 0 — extract labels, links, identifiers, window   (deterministic, always runs)
+route          structural, in code (§13.2) — never a semantic "does this need investigating"
  ▼
- ├─ Reproduce alert PromQL     (§3.1 ladder — degrades, never blocks)   ┐
- ├─ Baseline probe             (§3.5 — runs on labels alone)            │
- ├─ Deployment resolution      (table lookup, §4.1; may be unresolved)  │
- ├─ Pod/HPA/deploy events      (structured)                             ├─ parallel
- ├─ Benign-pattern checklist   (§3.2 — additive, may be empty)          │
- ├─ Impact quantification      (§5.2 — hard-routed to LB logs)          │
- ├─ rec-knowledge retrieval    (agentic lexical, §6.1)                  │
- └─ Code search                (agentic, multi-round, §4.2)             ┘
+baseline       ── the evidence floor. no LLM. the ONLY edge into planner. ──┐
+ │  Stage 0 extraction: labels, links, identifiers, window                  │
+ │  1. the alert's own PromQL, at its own granularity   (§3.1 ladder)       │
+ │  2. deployment resolution                            (§4.1, may be low)  │
+ │  3. golden signals / replicas / pod starts           (§3.5)              │
+ │  4. impact from the ingress layer                    (§5.2)              │
+ │  5. benign-pattern checklist                         (§3.2, may be empty)│
+ ▼                                                                          │
+planner        reads baseline + retrieved runbooks; emits a step list  ─────┘
  ▼
-Assemble under context budget
+executor       one step, one tool round-trip, appends to past_steps
  ▼
-Evidence pack  +  confidence-tagged hypothesis
+replanner      continue | replan | respond          ──┐
+ │                                                    │ conditional edge
+ └────────────── back to executor ────────────────────┘
+ ▼
+respond        renders the pack: evidence, hypothesis, banners, accounting
 ```
 
-**Nothing in that fan-out is conditional on recognizing the alert** (§1.1). Branches vary
-in what they *return* — a checklist may be empty, a deployment may be unresolved, a rule
-may come from rung 4 of §3.1 — and each says which. None of them is skipped because
-identification came back "unknown".
+Two properties matter more than the node list.
 
-Hard limits enforced in the routing function, where the model has **no veto**:
+**`baseline` sits on the only edge into `planner`.** The planner cannot propose skipping
+it, reorder it, or run before it, because there is no graph path that reaches `planner`
+without traversing it. This is §1.1 made structural: the deterministic half of §1 is not a
+step the model schedules, it is the precondition of the model being consulted at all.
 
-- **Max search rounds** — set from the labeled set's rounds-vs-accuracy curve, measured
-  before launch. Not a guessed constant.
+**`collect_baseline(identity, rule, resolution, *, minutes)` cannot accept thread
+context.** Not "is instructed not to read it" — cannot receive it. The engineer's question
+and the thread priors are in `state`, and that function does not take them as arguments.
+§3.3's hard constraint ("prior information reorders work; it never removes it") and §3.4's
+("the question shapes emphasis, never collection") are therefore enforced by a signature,
+and a test asserts the signature rather than trusting the next editor.
+
+`baseline` and `past_steps` are append-only channels (`operator.add`). No later node can
+shrink the evidence floor.
+
+Hard limits enforced in graph code, where the model has **no veto**:
+
 - **Wall-clock budget** — this runs during an incident; slow is useless. Partial evidence
-  delivered on time beats complete evidence delivered late, so the assembler emits whatever
-  has returned when the budget expires and marks the rest as timed out.
-- **Token budget**
+  delivered on time beats complete evidence delivered late, so `respond` emits whatever has
+  returned and marks the rest as timed out.
+- **Step ceiling** — a hard stop, checked before the replanner is consulted rather than
+  requested of it in prose.
+- **Re-planning cannot grow the plan.** A replan may shrink or replace remaining steps;
+  `new_steps[:len(plan)]` makes "add three more probes" unrepresentable.
+- **Duplicate-call and required-argument rejection** — repeating a call cannot produce a
+  new observation, and a malformed call gets a rejection naming the missing field, not a
+  bare error the model answers by reissuing the same call.
+- **Token budget.**
+
+The sibling implementation this is adopted from states several of these limits in prompt
+text ("已执行步骤 >= 5 时禁止 replan"). Prompt text is advisory. Each one above is a branch
+in `app/graph/guards.py`.
+
 
 ### 8.1 Model tiering and failure behavior
 
@@ -1243,6 +1306,101 @@ the measurable time savings, which is the argument for shipping it before anythi
 
 ---
 
+## 13. Slack integration and the process model
+
+Added 2026-08-26. §12 established the *policy* — the agent is summoned, never auto-posted.
+This section is the mechanism.
+
+### 13.1 Two processes, because one event loop is not shared
+
+`oncall-slackd` holds the Socket Mode WebSocket. `oncall-api` serves HTTP, SSE and the web
+UI. They import the same compiled graph and share a Postgres checkpointer; they do not share
+a process.
+
+Socket Mode is the right transport here for a reason that has nothing to do with Slack
+features: the agent's tools reach Grafana, Milvus and internal MCP servers, so the process
+must live inside the network, and Socket Mode dials out rather than requiring ingress.
+
+The split is not stylistic. bolt-python's maintainer advises against sharing one event loop
+between a web app and a WebSocket client, and the common FastAPI-lifespan workaround breaks
+outright at `uvicorn --workers > 1` — each worker opens its own socket and every event is
+processed N times. Separating them also means an API deploy does not drop the Slack
+connection.
+
+Operationally: Slack recycles connections every few hours with ~10s notice and caps an app
+at 10 concurrent sockets, so `slackd` runs at ≥2 replicas and relies on §13.3 to make
+duplicate delivery harmless. And because failing >95% of deliveries in an hour *disables the
+app's event subscriptions*, handler exceptions are caught and reported into the thread —
+never allowed to escape and crash-loop the container off Slack.
+
+### 13.2 Routing is structural, never semantic
+
+The router decides `triage | followup | chat | writeup | rating`, in code.
+
+The tempting design is a classifier that reads the message and decides whether an
+investigation is warranted. That is the recognition gate §1.1 exists to forbid, wearing a
+different hat: it can answer "this one doesn't need the full workup", invisibly and with no
+trace, which is the failure mode §1.1 was written about.
+
+So the question is never *do I recognize this alert*. It is *does this thread contain an
+alert message*, answered from Slack metadata — the root message's `bot_id` / `app_id` /
+`subtype`, and whether the channel is a configured alert channel. An alert nobody has
+catalogued still routes to triage, because provenance does not depend on the registry. The
+keyword table is consulted last, and only for alerts a human pasted in by hand.
+
+A `chat` turn is not a bypass. It still has tools and is still recorded. What it lacks is an
+alert to establish a floor for — which is a different situation from one that was skipped.
+
+**Substring matching for side effects is removed.** `_wants_writeback()` fired on the word
+"resolved" appearing anywhere in a mention. Write-up and rating now arrive through explicit
+Block Kit affordances carrying an `invocation_id`. A sentence should not be able to open a
+pull request.
+
+### 13.3 One mention, one investigation
+
+Slack retries unacked envelopes and redelivers on reconnect; with two replicas, duplicate
+delivery is routine. A `slack_events(event_id primary key)` claim makes the turn idempotent.
+
+The claim is taken **after** the turn is durably recorded, not before. The reverse ordering
+is what makes a restart lose work permanently: the dedupe row survives the crash and blocks
+the redelivery that would have retried it.
+
+### 13.4 The thread is the session
+
+The LangGraph `thread_id` is `slack:{team}:{channel}:{thread_ts}`, so §3.7's short-term
+memory stops being a Postgres read-back and becomes checkpointed graph state. Its two ideas
+survive as reducers: carry the previous conclusion, and carry **what was already searched** —
+re-running a search that came back empty is the commonest way a follow-up wastes a round.
+
+Two mentions in one thread would interleave writes into one checkpoint, so a Postgres
+advisory lock on the thread serializes turns; the loser says it is still working rather than
+corrupting state.
+
+Conversation arrives on two surfaces: `app_mention` in a channel (the summoned path of §12)
+and `message.im` for a direct message, where no mention is needed because the DM itself is
+the summons.
+
+### 13.5 Ninety seconds of visible work
+
+An incident channel watching a silent bot assumes it has hung, and the 3-second ack deadline
+applies to Socket Mode exactly as it does to HTTP. So handlers ack immediately and run the
+turn in a background task; progress streams into the thread from the same event stream the
+SSE endpoint consumes.
+
+Progress is **batched**. `chat.update` is rate-limited to roughly one call per second per
+channel, and the previous implementation edited once per investigation step with no
+coalescing. The writer emits the first update immediately, at most one edit per 1.5s
+thereafter, the final one unconditionally, and backs off on `Retry-After` rather than
+dropping updates.
+
+Slack's newer streaming methods have a higher budget and accept real Markdown, which would
+remove the mrkdwn translation step. They are implemented behind a flag and default off: the
+API reference says thread-scoped streaming returns `invalid_thread_ts` outside
+single-session channels while the SDK's own examples pass `thread_ts`, and an on-call bot
+lives in threads. The adapter falls back on that error, so the flag is safe to test for real.
+
+---
+
 ## Design principles applied
 
 1. **Ask where the answer lives before choosing an architecture.** Metrics → structured
@@ -1284,7 +1442,21 @@ the measurable time savings, which is the argument for shipping it before anythi
     datasources it was configured with, whatever a link claims to be. Deriving trust from
     a URL's shape is how an SSRF filter gets walked past — and it makes identification and
     authorization two decisions that can disagree, where one table serves both.
-13. **A degraded input degrades the output with a label attached.** A reconstructed query,
+13. **Make the wrong thing inexpressible, not forbidden.** A prompt that says "never count
+    impact from sampled logs" is a request. A function with no `source` parameter is a
+    guarantee. When a constraint matters, spend the design effort on the signature rather
+    than on the wording — and write the test against the signature, so the next editor has
+    to argue with CI rather than with a comment. (§5.1, §8)
+14. **Put the floor on the only path in.** Adopting a planning agent means the model decides
+    the order of work. That is the point, and it is also the risk: anything the model
+    schedules, it can deschedule. The deterministic evidence floor is therefore not a step
+    the planner ranks first — it is a node the planner cannot reach around, because no graph
+    edge into the planner bypasses it. (§8)
+15. **Route on provenance, not on text.** "Which alert is this" is a semantic question that
+    can be wrong quietly. "Did a bot post the message this thread hangs off" is a metadata
+    lookup that cannot. Where a decision gates whether work happens at all, prefer the
+    question whose failure is loud. (§13.2)
+16. **A degraded input degrades the output with a label attached.** A reconstructed query,
     a guessed deployment, a precedent instead of a measurement — each is usable when it
     says what it is. The danger was never the weaker input; it was the weaker input
     rendering identically to the strong one.
