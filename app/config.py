@@ -1,109 +1,90 @@
-"""Settings. No I/O at import time.
+"""配置管理模块
 
-The sibling project binds its MCP server map at module import and connects to Milvus from a
-module-level singleton, which means importing the agent package opens sockets — and makes
-the CLI, the tests and the Slack process all pay for a dependency they may not use. Nothing
-here connects to anything; construction is the caller's job.
+使用 Pydantic Settings 实现类型安全的配置管理
 """
 
-from functools import lru_cache
-from pathlib import Path
-from typing import Any
-
-from pydantic import Field
+from typing import Dict, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
+    """应用配置"""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        env_nested_delimiter="__",
         case_sensitive=False,
         extra="ignore",
     )
 
-    app_name: str = "oncall-agent"
-    app_version: str = "2.0.0"
+    # 应用配置
+    app_name: str = "SuperBizAgent"
+    app_version: str = "1.0.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 9900
 
-    # --- model ---------------------------------------------------------------
-    llm_provider: str = "dashscope"  # dashscope | openai
-    dashscope_api_key: str = ""
-    dashscope_api_base: str = ""
-    openai_api_key: str = ""
-    openai_api_base: str = ""
-    model_deep: str = "qwen-max"
-    model_fast: str = "qwen-plus"
-    llm_max_attempts: int = 4
+    # DashScope 配置
+    dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
+    dashscope_model: str = "qwen-max"
+    dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
 
-    # --- retrieval -----------------------------------------------------------
+    # Milvus 配置
     milvus_host: str = "localhost"
     milvus_port: int = 19530
-    milvus_collection: str = "oncall_knowledge"
-    dashscope_embedding_model: str = "text-embedding-v4"
+    milvus_timeout: int = 10000  # 毫秒
+
+    # RAG 配置
     rag_top_k: int = 3
+    rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
+
+    # 文档分块配置
     chunk_max_size: int = 800
     chunk_overlap: int = 100
 
-    # --- metrics / logs ------------------------------------------------------
-    grafana_url: str = ""
-    grafana_token: str = ""
+    # MCP 服务配置（transport: stdio | sse | streamable-http）
+    # 腾讯云托管 MCP 的 URL 通常含 /sse/，需使用 sse；本地 FastMCP 使用 streamable-http
+    mcp_cls_transport: str = "streamable-http"
+    mcp_cls_url: str = "http://localhost:8003/mcp"
+    mcp_monitor_transport: str = "streamable-http"
+    mcp_monitor_url: str = "http://localhost:8004/mcp"
+
+    # Prometheus
     prometheus_base_url: str = "http://127.0.0.1:9090"
     prometheus_request_timeout: float = 10.0
 
-    # --- MCP -----------------------------------------------------------------
-    mcp_grafana_url: str = "http://localhost:8005/mcp"
-    mcp_monitor_url: str = "http://localhost:8004/mcp"
-    mcp_cls_url: str = "http://localhost:8003/mcp"
-    mcp_transport: str = "streamable-http"
-    mcp_enabled: str = "grafana"  # comma-separated subset of the keys below
-
-    # --- repos ---------------------------------------------------------------
-    repo_root: Path = Path.home() / "Project"
-    knowledge_repo: Path = Path.home() / "Project" / "rec-knowledge"
-
-    # --- budgets (graph guards; the model has no vote) -----------------------
-    max_steps: int = 8
-    replan_ban_after: int = 5
-    wall_clock_seconds: float = 120.0
-    query_window_minutes: int = 60
-
-    # --- persistence ---------------------------------------------------------
-    database_url: str = ""
-
-    # --- slack ---------------------------------------------------------------
+    # Slack 配置
+    # 路由读的是「消息来源」而不是「消息内容」：把发告警的 bot / app / 频道列在这里，
+    # 没有被登记过的告警也能拿到完整排查，而不是靠关键词认出来才排查。
     slack_bot_token: str = ""
     slack_app_token: str = ""
-    slack_alert_bot_ids: list[str] = Field(default_factory=list)
-    slack_alert_app_ids: list[str] = Field(default_factory=list)
-    slack_alert_channels: list[str] = Field(default_factory=list)
-    slack_use_streaming: bool = False
-    slack_progress_interval: float = 1.5
+    slack_alert_bot_ids: list[str] = []
+    slack_alert_app_ids: list[str] = []
+    slack_alert_channels: list[str] = []
     slack_thread_limit: int = 50
+    slack_progress_interval: float = 1.5
+    slack_use_streaming: bool = False
 
     @property
-    def mcp_servers(self) -> dict[str, dict[str, Any]]:
-        """Only the servers named in `mcp_enabled`. A URL that is configured but not
-        enabled is not dialled — an unreachable MCP server should be a choice, not a
-        surprise at first tool load."""
-        available = {
-            "grafana": self.mcp_grafana_url,
-            "monitor": self.mcp_monitor_url,
-            "cls": self.mcp_cls_url,
-        }
-        enabled = {n.strip() for n in self.mcp_enabled.split(",") if n.strip()}
+    def mcp_servers(self) -> Dict[str, Dict[str, Any]]:
+        """获取完整的 MCP 服务器配置"""
         return {
-            name: {"transport": self.mcp_transport, "url": url}
-            for name, url in available.items()
-            if name in enabled
+            "cls": {
+                "transport": self.mcp_cls_transport,
+                "url": self.mcp_cls_url,
+            },
+            "monitor": {
+                "transport": self.mcp_monitor_transport,
+                "url": self.mcp_monitor_url,
+            }
         }
 
 
-@lru_cache
+# 全局配置实例
+config = Settings()
+
+
 def get_settings() -> Settings:
-    return Settings()
+    """The Slack layer takes settings as an argument rather than importing the singleton,
+    so it can be tested against a constructed one."""
+    return config

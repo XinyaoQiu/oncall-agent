@@ -18,14 +18,15 @@ and `command` and never message text.
 
 from collections import OrderedDict
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
-from app.graph.state import Turn
 from app.slack.thread import ThreadMessage, to_message
+
+Turn = Literal["triage", "followup", "chat", "writeup", "rating"]
 
 WRITEUP_AFFORDANCES = {"writeup", "write_up", "record"}
 RATING_AFFORDANCES = {"rating", "rate", "verdict", "feedback"}
@@ -119,11 +120,11 @@ def has_alert_context(
         return True, 4, "this thread was already triaged"
 
     if root is not None and root.text:
-        from app.domain.alerts import match_alert
+        from app.slack.alerts import match_alert
 
         known = match_alert(root.text)
         if known is not None:
-            return True, 5, f"root text matches {known.name}"
+            return True, 5, f"root text looks like an alert ({known})"
 
     return False, 6, "no alert message in this thread"
 

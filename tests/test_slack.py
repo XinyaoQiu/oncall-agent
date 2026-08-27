@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from app.config import Settings
-from app.domain.alerts import match_alert
+from app.slack.alerts import match_alert
 from app.slack.dedupe import InMemoryDedupe
 from app.slack.handlers import SlackRuntime, run_slack_turn
 from app.slack.intent import classify_intent as real_classify_intent
@@ -220,7 +220,7 @@ async def test_prior_triage_makes_the_next_turn_a_followup():
 
 
 async def test_human_pasted_known_alert_routes_to_triage_by_keyword():
-    thread = thread_of(human("channel latency is alerting again on news-list-for-channel"))
+    thread = thread_of(human("[FIRING] HighCPUUsage on node-3, cpu 94%"))
     decision = await decide(mention("look?", channel="C0RANDOM"), thread, settings=settings())
 
     assert (decision.turn, decision.rule) == ("triage", 5)
@@ -438,8 +438,10 @@ def test_mrkdwn_does_not_eat_slack_bold():
 
 
 def fake_run_turn(response: str):
-    async def run_turn(state_in, *, settings, thread_id, checkpointer=None):
-        run_turn.states.append(state_in)
+    async def run_turn(turn, *, question, alert_text, thread_id):
+        run_turn.states.append(
+            {"turn": turn, "question": question, "alert_text": alert_text, "thread_id": thread_id}
+        )
         yield {"type": "status", "stage": "start", "message": "starting"}
         yield {"type": "step", "stage": "executor", "message": "queried ingress"}
         yield {"type": "complete", "stage": "complete", "message": "done", "response": response}
@@ -463,7 +465,7 @@ async def test_a_turn_renders_through_the_one_renderer_and_records_the_route(mon
     assert "*Findings*" in text and "• ingress reload" in text
     assert "<https://x.test|link>" in text
     assert fake.states[0]["turn"] == "triage"
-    assert fake.states[0]["conversation_id"] == f"slack:T0:{ALERT_CHANNEL}:1.0"
+    assert fake.states[0]["thread_id"] == f"slack:T0:{ALERT_CHANNEL}:1.0"
     assert fake.states[0]["alert_text"] == UNKNOWN_ALERT_TEXT
     assert runtime.turns.turns(f"slack:T0:{ALERT_CHANNEL}:1.0") == ("triage",)
 
@@ -527,7 +529,7 @@ class TestIntentGate:
 
     ALERT_ROOT = [
         ThreadMessage(
-            user="", text="[FIRING] news-list-for-channel p99", ts="1",
+            user="", text="[FIRING] HighCPUUsage on node-3", ts="1",
             is_bot=True, bot_id="B01ALERTBOT", subtype="bot_message",
         )
     ]
@@ -592,7 +594,7 @@ class TestIntentClassifierBias:
         def boom(*a, **k):
             raise RuntimeError("no api key")
 
-        monkeypatch.setattr("app.core.llm_factory.get_llm", boom)
+        monkeypatch.setattr("app.core.llm_factory.llm_factory.create_chat_model", boom)
         verdict, why = await real_classify_intent("anything", settings=settings())
         assert verdict == "investigate", "uncertainty resolves toward investigating"
 
@@ -615,21 +617,9 @@ class TestTopLevelMentions:
             return "investigate", ""
 
         monkeypatch.setattr("app.slack.intent.classify_intent", stub)
-        pasted = mention("[FIRING] news-list-for-channel p99 app=server-feed", channel="C0RANDOM")
+        pasted = mention("[FIRING] HighCPUUsage on node-3", channel="C0RANDOM")
         d = await decide(pasted, [], settings=settings())
         assert d.turn == "triage"
         assert d.rule == 5
 
 
-class TestChatSkipsTheEvidenceFloor:
-    def test_chat_enters_at_the_chat_node(self):
-        from app.graph.build import BASELINE, CHAT, entry_for
-
-        assert entry_for({"turn": "chat"}) == CHAT
-        for turn in ("triage", "followup", "writeup", "rating"):
-            assert entry_for({"turn": turn}) == BASELINE
-
-    def test_an_unset_turn_takes_the_floor(self):
-        from app.graph.build import BASELINE, entry_for
-
-        assert entry_for({}) == BASELINE, "the default must be the safe direction"

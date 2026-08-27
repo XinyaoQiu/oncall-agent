@@ -20,8 +20,7 @@ from typing import Any
 from loguru import logger
 
 from app.config import Settings
-from app.graph.build import run_turn
-from app.render.answer import render_answer
+from app.slack.dispatch import run_turn
 from app.slack.dedupe import Dedupe
 from app.slack.mrkdwn import to_mrkdwn
 from app.slack.progress import ProgressWriter
@@ -31,7 +30,6 @@ from app.slack.thread import (
     alert_message,
     clean_text,
     fetch_thread,
-    priors,
     thread_digest,
 )
 
@@ -50,13 +48,11 @@ class SlackRuntime:
         dedupe: Dedupe,
         *,
         turns: TurnLog | None = None,
-        checkpointer: Any = None,
     ) -> None:
         self.settings = settings
         self.identity = identity
         self.dedupe = dedupe
         self.turns = turns or TURNS
-        self.checkpointer = checkpointer
         self.busy: set[str] = set()
 
     def thread_id(self, team: str, channel: str, thread_ts: str) -> str:
@@ -76,21 +72,6 @@ async def _say(client: Any, channel: str, thread_ts: str, text: str) -> None:
         await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
     except Exception as exc:
         logger.error(f"could not post into {channel}/{thread_ts}: {exc}")
-
-
-async def _final_state(runtime: SlackRuntime, thread_id: str) -> dict[str, Any] | None:
-    """The finished state, when a checkpointer kept one. Without it there is nothing to read."""
-    if runtime.checkpointer is None:
-        return None
-    try:
-        from app.graph.build import graph_for
-
-        graph = graph_for(runtime.settings, runtime.checkpointer)
-        snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
-        return dict(snapshot.values) if snapshot and snapshot.values else None
-    except Exception as exc:
-        logger.warning(f"could not read final state for {thread_id}: {exc}")
-        return None
 
 
 async def run_slack_turn(
@@ -136,14 +117,8 @@ async def run_slack_turn(
 
         question = clean_text(event.get("text"))
         alert = alert_message(messages)
-        state_in: dict[str, Any] = {
-            "input": question,
-            "turn": decision.turn,
-            "conversation_id": thread_id,
-            "alert_text": alert.text if alert else question,
-            "priors": priors(messages),
-            "thread_digest": thread_digest(messages),
-        }
+        digest = thread_digest(messages)
+        asked = "\n\n".join(x for x in (digest and f"Thread so far:\n{digest}", question) if x)
 
         progress = ProgressWriter(
             client,
@@ -156,10 +131,10 @@ async def run_slack_turn(
         lines: list[str] = []
         answer, failure = "", ""
         async for event_out in run_turn(
-            state_in,
-            settings=settings,
+            decision.turn,
+            question=asked,
+            alert_text=alert.text if alert else question,
             thread_id=thread_id,
-            checkpointer=runtime.checkpointer,
         ):
             kind = event_out.get("type")
             if kind == "error":
@@ -170,9 +145,6 @@ async def run_slack_turn(
                 lines.append(str(event_out["message"]))
                 await progress.update(lines)
 
-        state = await _final_state(runtime, thread_id)
-        if state:
-            answer = render_answer(state, markup="slack")  # type: ignore[arg-type]
         if not answer:
             reason = failure or "no answer was produced"
             answer = f":warning: I could not finish this one — {reason}"

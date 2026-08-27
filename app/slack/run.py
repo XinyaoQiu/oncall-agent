@@ -4,7 +4,7 @@ It owns the WebSocket and nothing else. Spec §2.2: the bolt maintainer's own ad
 sharing one event loop between a web app and the Socket Mode client is not supported, and
 the lifespan workaround breaks outright under `uvicorn --workers > 1`, where every replica
 opens its own connection and processes every event N times. So `oncall-api` is a separate
-process; the two share a compiled graph definition and a checkpointer, not a runtime.
+process; each service keeps its own conversation memory, keyed by the Slack thread.
 
 Both identifiers are resolved here, once, from `auth.test` — `bot_id` (`B…`) and
 `bot_user_id` (`U…`) — because everything downstream that asks "did we write this" needs the
@@ -29,7 +29,7 @@ def _check(settings: Settings) -> None:
         raise SystemExit(f"missing required settings: {', '.join(missing)}")
 
 
-async def serve(settings: Settings | None = None, *, checkpointer=None) -> None:
+async def serve(settings: Settings | None = None) -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_bolt.app.async_app import AsyncApp
 
@@ -43,7 +43,7 @@ async def serve(settings: Settings | None = None, *, checkpointer=None) -> None:
     dedupe = build_dedupe(settings)
     await dedupe.setup()
 
-    register(app, SlackRuntime(settings, identity, dedupe, checkpointer=checkpointer))
+    register(app, SlackRuntime(settings, identity, dedupe))
 
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     logger.info("oncall-slackd listening")

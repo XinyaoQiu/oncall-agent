@@ -136,7 +136,7 @@ def alert_message(
     if root.is_foreign_bot:
         return root
     if match is None:
-        from app.domain.alerts import match_alert as match
+        from app.slack.alerts import match_alert as match
 
     return root if root.text and match(root.text) else None
 

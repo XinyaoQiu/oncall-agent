@@ -1,94 +1,98 @@
-"""`oncall-api`: the HTTP surface. One of two processes, on purpose.
+"""FastAPI 应用入口
 
-Slack owns its own process (`oncall-slackd`). Sharing one event loop between a WebSocket
-client and a web app is something bolt-python's maintainer advises against directly, and the
-lifespan workaround breaks under `uvicorn --workers > 1`: each worker opens its own Socket
-Mode connection and every Slack event is handled N times (spec §2.2). Two processes also buy
-restart independence — deploying the API does not drop the Socket Mode connection.
-
-Nothing connects at import time. `create_app()` builds the app object; the record store is
-opened in the lifespan and its absence is a supported configuration, not an error, so the
-service still answers with no Postgres anywhere.
+主应用程序，配置路由、中间件、静态文件等
 """
-
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from contextlib import asynccontextmanager
+import os
+
+from app.config import config
 from loguru import logger
+from app.api import chat, health, file, aiops
+from app.core.milvus_client import milvus_manager
 
-from app.api import admin, health, triage
-from app.config import Settings, get_settings
-from app.storage.records import open_store
 
-DESCRIPTION = (
-    "On-call triage: a LangGraph plan-execute-replan graph over MCP tools, with a "
-    "deterministic evidence floor that runs before anything reasons."
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时执行
+    logger.info("=" * 60)
+    logger.info(f"🚀 {config.app_name} v{config.app_version} 启动中...")
+    logger.info(f"📝 环境: {'开发' if config.debug else '生产'}")
+    logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
+    logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
+    
+    # 连接 Milvus
+    logger.info("🔌 正在连接 Milvus...")
+    milvus_manager.connect()
+    logger.info("✅ Milvus 连接成功")
+    
+    logger.info("=" * 60)
+    
+    yield
+    
+    # 关闭时执行
+    logger.info("🔌 正在关闭 Milvus 连接...")
+    milvus_manager.close()
+    logger.info(f"👋 {config.app_name} 关闭")
+
+
+# 创建 FastAPI 应用
+app = FastAPI(
+    title=config.app_name,
+    version=config.app_version,
+    description="基于 LangChain 的智能oncall运维系统",
+    lifespan=lifespan
 )
 
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境应该限制具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Assemble the service. Safe to call in a test: it opens no sockets."""
-    config = settings or get_settings()
+# 注册路由
+app.include_router(health.router, tags=["健康检查"])
+app.include_router(chat.router, prefix="/api", tags=["对话"])
+app.include_router(file.router, prefix="/api", tags=["文件管理"])
+app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.settings = config
-        app.state.store = await open_store(config.database_url)
-        logger.info(
-            f"{config.app_name} v{config.app_version} on {config.host}:{config.port} "
-            f"(records: {'on' if app.state.store else 'off'})"
-        )
-        yield
-        logger.info(f"{config.app_name} shutting down")
+# 挂载静态文件
+static_dir = "static"
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    app = FastAPI(
-        title=config.app_name,
-        version=config.app_version,
-        description=DESCRIPTION,
-        lifespan=lifespan,
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Also set outside the lifespan: a caller can hit a route without ever running startup.
-    app.state.settings = config
-    app.state.store = None
-
-    app.include_router(health.router, tags=["health"])
-    app.include_router(triage.router, tags=["triage"])
-    app.include_router(admin.router, tags=["admin"])
-
-    @app.get("/", tags=["health"])
-    async def root() -> dict[str, str]:
-        return {
-            "service": config.app_name,
-            "version": config.app_version,
-            "triage": "POST /triage",
-            "docs": "/docs",
-        }
-
-    return app
-
-
-app = create_app()
+@app.get("/")
+async def root():
+    """返回首页"""
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {
+        "message": f"Welcome to {config.app_name} API",
+        "version": config.app_version,
+        "docs": "/docs"
+    }
 
 
 def run() -> None:
-    """The `oncall-api` console script."""
+    """`oncall-api` 控制台入口。Slack 走 `oncall-slackd`，是另一个进程。"""
     import uvicorn
 
-    settings = get_settings()
     uvicorn.run(
         "app.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
-        log_level="debug" if settings.debug else "info",
+        host=config.host,
+        port=config.port,
+        reload=config.debug,
+        log_level="info",
     )
+
+
+if __name__ == "__main__":
+    run()

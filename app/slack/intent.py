@@ -57,9 +57,11 @@ async def classify_intent(text: str, *, settings: Settings) -> tuple[Intent, str
         return "investigate", "bare mention in an alert thread"
 
     try:
-        from app.core.llm_factory import get_llm
+        from app.core.llm_factory import llm_factory
 
-        llm = get_llm(settings, deep=False)
+        llm = llm_factory.create_chat_model(
+            model=settings.rag_model, temperature=0, streaming=False
+        )
         verdict = await llm.with_structured_output(IntentVerdict).ainvoke(
             [("system", SYSTEM_PROMPT), ("user", stripped[:2000])]
         )

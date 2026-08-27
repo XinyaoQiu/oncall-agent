@@ -1,7 +1,0 @@
-[
-  {"user": "alertmanager", "text": "[FIRING] news-list-for-channel p99 latency app=server-feed value 3.2s", "ts": "1755800000.000100", "is_bot": true},
-  {"user": "U_ALICE", "text": "deploy went out at 14:02, alert fired 14:11", "ts": "1755800120.000200"},
-  {"user": "U_BOB", "text": "kube_pod_start_time confirms 6 new server-feed pods started 14:03-14:05", "ts": "1755800180.000300"},
-  {"user": "U_ALICE", "text": "p99 back under 1s at 14:21, no action taken. cold start warmup, self-healed in ~10min as usual", "ts": "1755800900.000400"},
-  {"user": "U_BOB", "text": "resolved, closing", "ts": "1755800960.000500"}
-]

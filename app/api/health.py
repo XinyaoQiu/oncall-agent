@@ -1,166 +1,64 @@
-"""`/health`, reporting each dependency separately.
+"""健康检查接口"""
 
-The sibling project answers 503 when Milvus is down, on the reasoning that the database is
-the service. Here it is not: the product is the deterministic evidence floor, which needs no
-Milvus, no Postgres and no LLM to run — `oncall evidence` is that path — so a single number
-folding every dependency into "unhealthy" would take the API out of rotation for capabilities
-it can serve without, and a single "healthy" would hide which one is missing.
-
-So each dependency reports its own line, and the top-level status distinguishes *degraded*
-(something configured is unreachable, and the reply says which) from *ok*. Nothing here is
-inferred: a dependency that is not configured says so rather than counting as healthy, and
-the model is never dialled — a reachability probe that costs tokens is one nobody runs.
-"""
-
-import asyncio
 from typing import Any
-from urllib.parse import urlparse
-
-import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from app.config import config
+from app.core.milvus_client import milvus_manager
 from loguru import logger
-from pydantic import BaseModel, Field
-
-from app.config import Settings, get_settings
-from app.storage.records import RecordStore
 
 router = APIRouter()
 
-PROBE_TIMEOUT = 2.0
 
-
-class Dependency(BaseModel):
-    """One dependency's standing. `reachable` is None when nothing was dialled."""
-
-    name: str
-    configured: bool
-    reachable: bool | None = None
-    detail: str = ""
-
-
-class Health(BaseModel):
-    service: str
-    version: str
-    status: str
-    dependencies: list[Dependency] = Field(default_factory=list)
-
-
-async def _tcp_error(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> str | None:
-    """`None` when the port accepted a connection, otherwise why it did not."""
+@router.get("/health")
+async def health_check():
+    
+    """健康检查接口
+    检查服务状态和数据库连接状态
+    
+    Returns:
+        JSONResponse: 健康检查结果
+    """
+    # 检查服务基本状态
+    health_data: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
+        "service": config.app_name,
+        "version": config.app_version,
+        "status": "healthy"
+    }
+    
+    # 检查 Milvus 连接状态
     try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
-    except TimeoutError:
-        return f"no answer from {host}:{port} within {timeout:.0f}s"
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc}"
-    writer.close()
-    try:
-        await writer.wait_closed()
-    except Exception:
-        pass
-    return None
-
-
-def _host_port(url: str, default_port: int) -> tuple[str, int]:
-    parsed = urlparse(url if "//" in url else f"//{url}")
-    return parsed.hostname or "localhost", parsed.port or default_port
-
-
-async def _database(settings: Settings) -> Dependency:
-    if not settings.database_url:
-        return Dependency(
-            name="postgres",
-            configured=False,
-            detail="DATABASE_URL is unset; runs are not recorded and Slack dedupe is off",
-        )
-    error = await RecordStore(settings.database_url).ping()
-    return Dependency(
-        name="postgres", configured=True, reachable=error is None, detail=error or "answered"
-    )
-
-
-async def _milvus(settings: Settings) -> Dependency:
-    host, port = settings.milvus_host, settings.milvus_port
-    error = await _tcp_error(host, port)
-    return Dependency(
-        name="milvus",
-        configured=True,
-        reachable=error is None,
-        detail=error or f"{host}:{port} accepted a connection",
-    )
-
-
-async def _mcp(name: str, url: str) -> Dependency:
-    host, port = _host_port(url, 80)
-    error = await _tcp_error(host, port)
-    return Dependency(
-        name=f"mcp:{name}", configured=True, reachable=error is None, detail=error or url
-    )
-
-
-async def _grafana(settings: Settings) -> Dependency:
-    if not settings.grafana_url:
-        return Dependency(
-            name="grafana",
-            configured=False,
-            detail="GRAFANA_URL is unset; the alert's own rule cannot be fetched authoritatively",
-        )
-    try:
-        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT) as client:
-            response = await client.get(f"{settings.grafana_url.rstrip('/')}/api/health")
-        return Dependency(
-            name="grafana",
-            configured=True,
-            reachable=response.status_code < 500,
-            detail=f"HTTP {response.status_code}",
-        )
-    except Exception as exc:
-        return Dependency(
-            name="grafana", configured=True, reachable=False, detail=f"{type(exc).__name__}: {exc}"
-        )
-
-
-def _model(settings: Settings) -> Dependency:
-    provider = (settings.llm_provider or "").strip().lower()
-    key = settings.dashscope_api_key if provider == "dashscope" else settings.openai_api_key
-    return Dependency(
-        name=f"llm:{provider or 'unset'}",
-        configured=bool(key),
-        detail=(
-            f"{settings.model_deep} / {settings.model_fast}; not dialled, a reachability "
-            "probe would cost a request"
-            if key
-            else "no API key; triage returns an error rather than a partial pack"
-        ),
-    )
-
-
-async def check_dependencies(settings: Settings) -> list[Dependency]:
-    probes: list[Any] = [_database(settings), _milvus(settings), _grafana(settings)]
-    probes += [_mcp(name, conn.get("url", "")) for name, conn in settings.mcp_servers.items()]
-    results = await asyncio.gather(*probes, return_exceptions=True)
-
-    dependencies: list[Dependency] = []
-    for result in results:
-        if isinstance(result, Dependency):
-            dependencies.append(result)
-        else:
-            logger.warning(f"health probe raised: {result}")
-    dependencies.append(_model(settings))
-    return dependencies
-
-
-@router.get("/health", response_model=Health)
-async def health(request: Request) -> Health:
-    """Per-dependency reachability. Always 200: the service is answering, and what it can
-    and cannot do right now is in the body rather than in the status code."""
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    dependencies = await check_dependencies(settings)
-    degraded = [d.name for d in dependencies if d.configured and d.reachable is False]
-
-    return Health(
-        service=settings.app_name,
-        version=settings.app_version,
-        status="degraded" if degraded else "ok",
-        dependencies=dependencies,
+        milvus_healthy = milvus_manager.health_check()
+        milvus_status: str = "connected" if milvus_healthy else "disconnected"
+        milvus_message: str = "Milvus 连接正常" if milvus_healthy else "Milvus 连接异常"
+        health_data["milvus"] = {
+            "status": milvus_status,
+            "message": milvus_message
+        }
+    except Exception as e:
+        logger.warning(f"Milvus 健康检查失败: {e}")
+        health_data["milvus"] = {
+            "status": "error",
+            "message": f"Milvus 检查失败: {str(e)}"
+        }
+    
+    # 判断整体健康状态
+    overall_status = "healthy"
+    status_code = 200
+    
+    # 如果 Milvus 不可用，服务不可用
+    if health_data["milvus"]["status"] != "connected":
+        overall_status = "unhealthy"
+        status_code = 503
+        health_data["error"] = "数据库不可用"
+    
+    health_data["status"] = overall_status
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": "服务运行正常" if overall_status == "healthy" else "服务不可用",
+            "data": health_data
+        }
     )

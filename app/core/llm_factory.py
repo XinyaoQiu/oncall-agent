@@ -1,88 +1,52 @@
-"""Where a chat model comes from, and what happens when there isn't one.
+"""LLM 工厂类
 
-An unavailable model is an **error**, not a degraded mode (tech-design §8.1). The failure
-this guards against is specific: a triage reply that quietly lost its analysis section
-renders identically to a complete one, and nobody re-reads it during an incident to check.
-So there is no "return a stub and carry on" path here — construction either yields a model
-or raises.
+使用 LangChain ChatOpenAI 通过 OpenAI 兼容模式调用阿里云 DashScope
+这种方式便于后续切换到其他支持 OpenAI API 的模型提供商
 
-Which tier answered still travels with the reply (`state["degraded_model"]`), because a
-weaker model writes with exactly the same confidence as the strong one.
+支持的模型提供商（只需修改 base_url 和 api_key）：
+- 阿里云 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1
+- OpenAI: https://api.openai.com/v1
+- Azure OpenAI: https://{resource}.openai.azure.com
+- 其他兼容 OpenAI API 的服务
 """
 
-from typing import Any
-
-from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+from app.config import config
 from loguru import logger
 
-from app.config import Settings
 
-PROVIDERS = ("dashscope", "openai")
+class LLMFactory:
+    """LLM 工厂类 - 使用 OpenAI 兼容模式"""
 
+    # 阿里云 DashScope OpenAI 兼容模式 URL
+    DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-class LLMUnavailable(RuntimeError):
-    """The model cannot be reached or is not configured."""
+    @staticmethod
+    def create_chat_model(
+        model: str | None = None,
+        temperature: float = 0.7,
+        streaming: bool = True,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> ChatOpenAI:
+        model = model or config.dashscope_model
+        base_url = base_url or LLMFactory.DASHSCOPE_BASE_URL
+        api_key = api_key or config.dashscope_api_key
 
+        # 参考：https://help.aliyun.com/zh/model-studio/getting-started/models
+        extra_body = {}
+        extra_body["stream"] = streaming
 
-def model_name(settings: Settings, *, deep: bool = False) -> str:
-    return settings.model_deep if deep else settings.model_fast
-
-
-def _dashscope(settings: Settings, model: str, **kwargs: Any) -> BaseChatModel:
-    if not settings.dashscope_api_key:
-        raise LLMUnavailable(
-            "DASHSCOPE_API_KEY is not set. The agent needs a model to analyze alerts; "
-            "it will not emit a partial answer instead."
-        )
-    try:
-        from langchain_qwq import ChatQwen
-    except ImportError as exc:
-        raise LLMUnavailable(
-            f"llm_provider is 'dashscope' but langchain-qwq is missing: {exc}"
-        ) from exc
-
-    options: dict[str, Any] = {"model": model, "api_key": settings.dashscope_api_key}
-    if settings.dashscope_api_base:
-        options["api_base"] = settings.dashscope_api_base
-    return ChatQwen(temperature=0, **options, **kwargs)
-
-
-def _openai(settings: Settings, model: str, **kwargs: Any) -> BaseChatModel:
-    if not settings.openai_api_key:
-        raise LLMUnavailable(
-            "OPENAI_API_KEY is not set. The agent needs a model to analyze alerts; "
-            "it will not emit a partial answer instead."
-        )
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as exc:
-        raise LLMUnavailable(
-            f"llm_provider is 'openai' but langchain-openai is missing: {exc}"
-        ) from exc
-
-    options: dict[str, Any] = {"model": model, "api_key": settings.openai_api_key}
-    if settings.openai_api_base:
-        options["base_url"] = settings.openai_api_base
-    return ChatOpenAI(temperature=0, **options, **kwargs)
-
-
-def get_llm(settings: Settings, *, deep: bool = False, **kwargs: Any) -> BaseChatModel:
-    """The chat model for this tier, or `LLMUnavailable`.
-
-    `deep` selects the stronger, slower tier — used for the diagnosis, where the judgment
-    is the product. Planning and re-planning run on the fast tier.
-    """
-    provider = (settings.llm_provider or "").strip().lower()
-    model = model_name(settings, deep=deep)
-
-    if provider == "dashscope":
-        built = _dashscope(settings, model, **kwargs)
-    elif provider == "openai":
-        built = _openai(settings, model, **kwargs)
-    else:
-        raise LLMUnavailable(
-            f"unknown llm_provider {settings.llm_provider!r}; expected one of {PROVIDERS}"
+        llm = ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            streaming=streaming,
+            base_url=base_url,
+            api_key=api_key,
+            extra_body=extra_body if extra_body else None,
         )
 
-    logger.debug(f"llm: {provider}/{model} (deep={deep})")
-    return built
+        return llm
+
+# 全局 LLM 工厂实例
+llm_factory = LLMFactory()

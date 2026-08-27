@@ -1,169 +1,495 @@
-# oncall-agent
+# SuperBizAgent
 
-An on-call triage assistant. It lives in Slack: invite it to an alert channel, @-mention it
-in a thread, and it reads the alert, pulls the authoritative rule and metrics, searches past
-incidents and the code, and replies with a diagnosis. You can also just talk to it — ask
-what a service does or what an error code means — and it answers without turning the
-question into an investigation.
+> 企业级智能对话和运维助手，支持 RAG 知识库问答和 AIOps 智能诊断
 
-Design: [docs/tech-design.md](docs/tech-design.md) ·
-Rewrite spec: [docs/superpowers/specs/2026-08-26-langgraph-slack-rewrite.md](docs/superpowers/specs/2026-08-26-langgraph-slack-rewrite.md)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
+[![LangChain](https://img.shields.io/badge/LangChain-latest-orange.svg)](https://www.langchain.com/)
 
-## How it works
+
+## 💬 Slack 接入
+
+Bot 进告警频道，@ 它就行。它读得到 thread 里的告警原文和讨论，也能直接对话。
+
+```bash
+make slackd     # Socket Mode，独立进程
+```
+
+### 一个入口，两种执行
+
+Slack 没有导航栏——用户只会 @ 一句话，不会先选「运维」还是「问答」。所以入口必须统一。
+但入口统一不等于执行统一：一个知识问题不该跑四次模型调用去做 Plan-Execute-Replan。
+
+路由分两道闸，**事实归代码，意图归模型**：
 
 ```
-@oncall-agent in a Slack thread
+@oncall-agent
    │
-   ├─ is there an alert here?              code — reads Slack metadata, not the message text
-   │     no ─────────────────────────────► chat: tool-calling, bounded rounds
-   │     yes
-   ├─ is this message about diagnosing it?  model — consulted only when an alert exists
-   │     "what is server-feed?" ──────────► chat, and the reply says it did not investigate
-   │     anything else, or unsure ────────► triage
-   ▼
- baseline      the deterministic floor. no model. the only edge into the planner.
-   │           the alert's own query first, then deployment, golden signals, ingress impact
-   ▼
- planner       reads the floor and retrieved runbooks; emits a step list
-   ▼
- executor  ⇄  replanner        continue | replan | respond, with budgets in code
-   ▼
- respond       evidence, then a confidence-tagged hypothesis, with every banner it owes you
+① 这个 thread 里有告警吗？        代码 —— 读 Slack 元数据（bot_id / app_id / 频道）
+   │                              不是「我认不认识这条告警」：没被登记过的告警照样排查
+   ├── 没有 ─────────────────────► 对话 Agent
+   │
+   └── 有 ──► ② 这句话是要排查它，还是在问别的？    小模型，仅在①为真时才调用
+                ├── 想排查 / 拿不准 ──► 运维 Agent（Plan-Execute-Replan）
+                └── 只是提问 ────────► 对话 Agent，并在回复里说明没有排查，
+                                        一句「investigate」即可升级
 ```
 
-Four ideas run through it.
+两种误判代价不对称，所以偏向写死在代码里：把提问当成排查，浪费一分钟；把排查当成提问，
+工程师会**以为**已经排查过了。分类器失败、判决无法解析、空 @ 一律走排查。
 
-**The Slack message identifies the alert; it never supplies the numbers.** Rendered alert
-text rounds values and drops labels. A wrong identification fails loudly at rule lookup; a
-wrong number fails silently and ends up in the incident review as fact.
+而告警 thread 里走了对话，**必须说出来**——误判本身不可怕，静默的误判才可怕。
 
-**Correctness lives in signatures, not prompts.** `quantify_impact()` has no `source`
-parameter, so counting user impact from a log sampled at 1/8 is not forbidden — it is
-inexpressible. `collect_baseline(identity, rule, resolution, *, minutes)` cannot accept the
-engineer's question or the thread priors, so "the question shapes emphasis, never
-collection" is enforced by a signature with a test asserting it.
+### 只读一条 thread，不读频道历史
 
-**The floor is on the only path in.** Adopting a planning agent means the model decides the
-order of work — which is the point, and also the risk: anything it schedules, it can
-deschedule. So the deterministic evidence floor is not a step the planner ranks first. It is
-a node the planner cannot reach around.
+`conversations.replies` 是 thread 范围的，上限 50 条；`conversations.history` 不在默认路径上。
+事故频道很吵，把无关的几条告警拉进上下文只会稀释证据、制造歧义。
 
-**A degraded input degrades the output with a label attached.** A reconstructed query, a
-guessed deployment, fixture data instead of live metrics — each is usable when it says what
-it is. The danger was never the weaker input; it was the weaker input rendering identically
-to the strong one.
+两个例外：告警文本直接贴在 @ 里（按告警名/`[FIRING]` 识别），以及顶层 @ 时给一个
+「这个频道刚才有条告警，是这条吗」的**提议**——是提议，不是假设。
 
-## Quick start
+### 其他机制
+
+- **3 秒内 ack**，然后把 60–120 秒的排查丢进后台任务。Socket Mode 和 HTTP 一样有这个死线
+- **进度合并写入**：`chat.update` 大约每秒一次的配额，所以首次立即发、之后最快 1.5 秒一次、
+  最后一次必发，429 时按 `Retry-After` 拉长间隔而不是丢更新
+- **事件去重**：Slack 会重投未 ack 的事件，`event_id` 幂等，一次 @ 只排查一次
+- **`bot_id` 不是 `bot_user_id`**（`B...` vs `U...`）——很多参考实现把这两个拿来比较，
+  于是那段去重逻辑其实从没生效过。这里两个都在启动时从 `auth.test` 解析并分开存
+- **Slack mrkdwn 不是 Markdown**：`**粗体**` → `*粗体*`、`[文字](链接)` → `<链接|文字>`
+
+### Slack App 配置
+
+1. https://api.slack.com/apps → Create New App → From scratch
+2. Socket Mode → 开启 → 生成 app-level token（`connections:write`）→ `SLACK_APP_TOKEN`
+3. OAuth & Permissions → bot scopes：`app_mentions:read`、`channels:history`、
+   `groups:history`、`im:history`、`mpim:history`、`chat:write`、`chat:write.public`
+4. Event Subscriptions → 订阅 `app_mention` 和 `message.im`
+5. Install to Workspace → `SLACK_BOT_TOKEN`
+6. `/invite @oncall-agent` 进告警频道
+7. 把发告警的 bot ID 填进 `SLACK_ALERT_BOT_IDS` —— 路由读的是来源，这一步让**没被登记过的
+   告警**也能拿到完整排查
+
+Socket Mode 是往外拨的，不需要公网入口。这点在这里是必需而非偏好：agent 的工具要连
+Milvus、MCP server 和内网监控，进程本来就得待在网内。
+
+## ✨ 核心特性
+
+- 🤖 **智能对话** - LangChain 多轮对话 + 流式输出
+- 📚 **RAG 问答** - 向量检索增强，支持文档上传、自动建立向量索引、自动更新知识库
+- 🔧 **AIOps 诊断** - Plan-Execute-Replan 自动故障诊断和根因分析
+- 🌐 **Web 界面** - 现代化 UI，支持多种对话模式：快速问答/流式对话
+- 🔌 **MCP 集成** - 日志查询和监控数据工具接入
+- 💬 **Slack Bot** - @ 提及即用，读得到 thread 里的告警上下文，也能直接对话
+
+## 🛠️ 技术栈
+
+- **框架**: FastAPI + LangChain + LangGraph
+- **LLM**: 阿里云 DashScope (通义千问)
+- **向量库**: Milvus
+- **工具协议**: MCP (Model Context Protocol)
+
+## 🚀 快速开始
+
+### 环境要求
+- Python 3.10+
+- 阿里云 DashScope API Key ([获取地址](https://dashscope.aliyun.com/))
+
+### 安装和启动
+
+#### Linux/macOS 环境
 
 ```bash
-uv sync
-make up                    # postgres + milvus
-cp .env.example .env       # then fill in what you have
+# 1. 克隆项目
+git clone <repository_url>
+cd super_biz_agent_py
 
-# the deterministic half — no model, no API key, no services
-uv run oncall evidence "[FIRING] news-list-for-channel p99 app=server-feed"
+# 2. 安装依赖（推荐使用 uv）
+# 方式 1: 使用 uv（推荐，更快）
+pip install uv
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+
+# 方式 2: 使用 pip
+pip install -e .
+
+# 3. 编辑配置文件
+# 首次使用需要编辑 .env 文件，填入你的 DASHSCOPE_API_KEY
+vim .env  # 或使用其他编辑器
+
+# 4. 一键初始化（启动 Docker + 服务 + 上传文档）
+make init
+
+# 5. 一键启动
+make start
 ```
 
-That last command is the one that works with nothing configured. It prints the evidence
-floor and nothing else: which rung of the ladder the rule came from, how confident the
-deployment resolution is, and — importantly — how many queries were issued, returned data,
-came back empty, and failed. Those are four different numbers.
+#### Windows 环境（PowerShell/CMD）
 
-## Running it
+如果Windows 不支持 `make` 命令，可以手动执行以下步骤以启动服务：
+
+```powershell
+# 1. 克隆项目
+git clone <repository_url>
+cd super_biz_agent_py
+
+# 2. 创建虚拟环境并安装依赖
+# 方式 1: 使用 uv（推荐，更快）
+pip install uv
+# 创建虚拟环境
+uv venv
+# 激活虚拟环境
+.venv\Scripts\activate
+# 安装所有依赖
+uv pip install -e .
+
+# 方式 2: 使用 pip
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+
+# 3. 编辑配置文件
+# 使用记事本或其他编辑器打开 .env 文件，填入你的 DASHSCOPE_API_KEY
+notepad .env
+
+# 4. 启动 Docker Desktop
+# 确保 Docker Desktop 已安装并正在运行
+
+# 5. 启动 Milvus 向量数据库（Docker Compose）
+docker compose -f vector-database.yml up -d
+
+# 6. 等待 Milvus 启动完成（约 5-10 秒）
+timeout /t 10
+
+# 7. 启动 MCP 服务
+# 启动 CLS 日志查询服务（新开一个 PowerShell 窗口）
+python mcp_servers/cls_server.py
+
+# 启动 Monitor 监控服务（新开一个 PowerShell 窗口）
+python mcp_servers/monitor_server.py
+
+# 8. 启动 FastAPI 主服务（新开一个 PowerShell 窗口）
+# 注意：日志会自动输出到 logs\app_YYYY-MM-DD.log
+python -m uvicorn app.main:app --host 0.0.0.0 --port 9900
+
+# 9. 上传文档到向量库（新开一个 PowerShell 窗口）
+# 等待服务启动完成后执行
+timeout /t 5
+python -c "import requests, os, time; [requests.post('http://localhost:9900/api/upload', files={'file': open(f'aiops-docs/{f}', 'rb')}) or time.sleep(1) for f in os.listdir('aiops-docs') if f.endswith('.md')]"
+```
+
+**Windows 一键启动脚本**（推荐）
+
+使用启动脚本：
+
+```powershell
+# 启动所有服务
+.\start-windows.bat
+
+# 停止所有服务
+.\stop-windows.bat
+```
+
+### 访问服务
+- **Web 界面**: http://localhost:9900
+- **API 文档**: http://localhost:9900/docs
+
+## 📡 API 接口
+
+### 核心接口
+
+| 功能 | 方法 | 路径 | 说明 |
+|------|------|------|------|
+| 普通对话 | POST | `/api/chat` | 一次性返回 |
+| 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
+| AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
+| 文件上传 | POST | `/api/upload` | 上传并索引文档 |
+| 健康检查 | GET | `/api/health` | 服务状态检查 |
+
+### 使用示例
 
 ```bash
-make mcp        # Grafana MCP server on :8005 (serves flagged fixtures without GRAFANA_URL)
-make api        # HTTP + SSE on :9900
-make slackd     # the Slack bot, Socket Mode
-make check      # ruff + import contracts + tests
+# 普通对话
+curl -X POST "http://localhost:9900/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"Id":"session-123","Question":"你好"}'
+
+# 流式对话
+curl -X POST "http://localhost:9900/api/chat_stream" \
+  -H "Content-Type: application/json" \
+  -d '{"Id":"session-123","Question":"你好"}' \
+  --no-buffer
+
+# AIOps 诊断
+curl -X POST "http://localhost:9900/api/aiops" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"session-123"}' \
+  --no-buffer
 ```
 
-`oncall-api` and `oncall-slackd` are **two processes on purpose**. bolt-python's maintainer
-advises against sharing an event loop between a web app and a WebSocket client, and the
-common lifespan workaround breaks under `uvicorn --workers > 1` — each worker opens its own
-socket and handles every Slack event again.
+## 📁 项目结构
 
-## Configuration
+```
+super_biz_agent_py/
+├── app/                                    # 应用核心
+│   ├── __init__.py                         # 包初始化（自动加载日志配置）
+│   ├── main.py                             # FastAPI 应用入口
+│   ├── config.py                           # 配置管理（环境变量、MCP 服务器配置）
+│   ├── api/                                # API 路由层
+│   │   ├── __init__.py
+│   │   ├── chat.py                         # 对话接口（RAG 聊天）
+│   │   ├── aiops.py                        # AIOps 接口（故障诊断）
+│   │   ├── file.py                         # 文件管理（文档上传）
+│   │   └── health.py                       # 健康检查（服务状态）
+│   ├── services/                           # 业务服务层
+│   │   ├── __init__.py
+│   │   ├── rag_agent_service.py            # RAG Agent（LangGraph 状态图）
+│   │   ├── aiops_service.py                # AIOps 服务（计划-执行-重规划）
+│   │   ├── vector_store_manager.py         # 向量存储管理器
+│   │   ├── vector_embedding_service.py     # 向量embedding服务
+│   │   ├── vector_index_service.py         # 向量索引服务
+│   │   ├── vector_search_service.py        # 向量检索服务
+│   │   └── document_splitter_service.py    # 文档分割服务
+│   ├── agent/                              # Agent 模块
+│   │   ├── __init__.py
+│   │   ├── mcp_client.py                   # MCP 客户端（工具调用）
+│   │   └── aiops/                          # AIOps 核心逻辑
+│   │       ├── __init__.py
+│   │       ├── planner.py                  # 计划制定器
+│   │       ├── executor.py                 # 步骤执行器
+│   │       ├── replanner.py                # 重规划器
+│   │       ├── state.py                    # 状态定义
+│   │       └── utils.py                    # 工具函数
+│   ├── slack/                              # Slack 接入层（Socket Mode，独立进程）
+│   │   ├── run.py                          # oncall-slackd 入口
+│   │   ├── handlers.py                     # app_mention / message.im，先 ack 再后台跑
+│   │   ├── router.py                       # 结构判断（有没有告警）→ 意图判断
+│   │   ├── intent.py                       # 意图分类，拿不准一律走排查
+│   │   ├── dispatch.py                     # 把运维 Agent 和对话 Agent 收敛成一条事件流
+│   │   ├── thread.py                       # 读 thread、区分告警消息和人类消息
+│   │   ├── progress.py                     # 进度合并写入，避开 chat.update 限流
+│   │   ├── alerts.py                       # 从 aiops-docs 提取的告警名，路由最后一条规则用
+│   │   ├── dedupe.py                       # event_id 幂等，一次 @ 一次排查
+│   │   └── mrkdwn.py                       # Markdown → Slack mrkdwn
+│   ├── models/                             # 数据模型层
+│   │   ├── __init__.py
+│   │   ├── aiops.py                        # AIOps 模型
+│   │   ├── document.py                     # 文档模型
+│   │   ├── request.py                      # 请求模型
+│   │   └── response.py                     # 响应模型
+│   ├── tools/                              # Agent 工具集
+│   │   ├── __init__.py
+│   │   ├── knowledge_tool.py               # 知识库查询工具
+│   │   └── time_tool.py                    # 时间工具
+│   ├── core/                               # 核心组件
+│   │   ├── __init__.py
+│   │   ├── llm_factory.py                  # LLM 工厂（模型管理）
+│   │   └── milvus_client.py                # Milvus 客户端
+│   └── utils/                              # 工具类
+│       ├── __init__.py
+│       └── logger.py                       # 日志配置（Loguru）
+├── static/                                 # Web 前端（纯静态）
+│   ├── index.html                          # 主页面
+│   ├── app.js                              # 前端逻辑
+│   └── styles.css                          # 样式表
+├── mcp_servers/                            # MCP 服务器
+│   ├── cls_server.py                       # CLS 日志查询服务
+│   ├── monitor_server.py                   # 监控数据服务
+│   └── README.md                           # MCP 服务说明
+├── aiops-docs/                             # 运维知识库（Markdown 文档）
+├── logs/                                   # 日志目录（Loguru 自动创建）
+│   └── app_YYYY-MM-DD.log                  # 按天轮转的日志文件
+├── uploads/                                # 上传文件临时目录
+├── volumes/                                # Milvus 数据持久化目录
+├── .env                                    # 环境变量配置（需手动创建）
+├── Makefile                                # 项目管理命令（Linux/macOS）
+├── start-windows.bat                       # Windows 启动脚本
+├── stop-windows.bat                        # Windows 停止脚本
+├── vector-database.yml                     # Milvus Docker Compose 配置
+├── pyproject.toml                          # 项目配置（依赖、元数据）
+├── uv.lock                                 # uv 依赖锁定文件
+├── pyrightconfig.json                      # Pyright 类型检查配置
+└── README.md                               # 项目说明
+```
 
-Everything degrades rather than crashes, and `/health` says which of these is missing and
-what that costs you.
+## ⚙️ 配置说明
 
-| Variable | Without it |
-|---|---|
-| `DASHSCOPE_API_KEY` (or `OPENAI_API_KEY`) | Triage returns an error. An unavailable model is an error, not a degraded mode — a reply that silently omits half its analysis renders identically to a complete one |
-| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | No Slack; the CLI and HTTP surfaces still work |
-| `SLACK_ALERT_BOT_IDS` | Alert threads are only recognised by keyword, not by provenance |
-| `GRAFANA_URL` | The MCP server serves fixtures, flagged as synthetic everywhere they appear |
-| `DATABASE_URL` | No run records, no verdicts, no Slack event dedupe |
-| `MILVUS_HOST` | No runbook retrieval; code search still works |
-
-## Slack app setup
-
-1. https://api.slack.com/apps → **Create New App** → **From scratch**
-2. **Socket Mode** → enable → app-level token with `connections:write` → `SLACK_APP_TOKEN`
-3. **OAuth & Permissions** → bot scopes: `app_mentions:read`, `channels:history`,
-   `groups:history`, `im:history`, `mpim:history`, `chat:write`, `chat:write.public`,
-   `commands`
-4. **Event Subscriptions** → subscribe to `app_mention` and `message.im`
-5. **Install to Workspace** → bot token → `SLACK_BOT_TOKEN`
-6. `/invite @oncall-agent` in your alert channel
-7. Put your alerting bot's ID in `SLACK_ALERT_BOT_IDS` — routing reads provenance, so this
-   is what lets an alert nobody has catalogued still get the full evidence floor
-
-Socket Mode dials out, so there is no public URL and no ingress. That matters here: the
-agent's tools reach Grafana, Milvus and internal MCP servers, so the process has to live
-inside the network anyway.
-
-## Two stores, one direction
-
-`rec-knowledge` holds reviewed conclusions the agent retrieves during triage. Postgres holds
-one row per invocation — which queries ran, what each round did, what was concluded at what
-confidence, and whether a human later corrected it.
-
-Runs are **never retrieved**. Burying the one useful entry under every attempt to find it is
-how a knowledge base degrades. The path out of the run store is review — a PR — never
-retrieval.
+通过 `.env` 文件配置：
 
 ```bash
-uv run oncall runs
-uv run oncall replay 12
-uv run oncall verdict 12 wrong --note "was actually a DNS failure"
-uv run oncall stats --days 30
+# 阿里云LLM DashScope 配置（必填）
+# 秘钥管理： https://bailian.console.aliyun.com/cn-beijing/?spm=5176.29597918.J_SEsSjsNv72yRuRFS2VknO.2.61ac133ccTVQLw&tab=demohouse#/api-key
+DASHSCOPE_API_KEY=your-api-key （配置你自己的秘钥）
+DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1  # 不配置则默认会使用新加坡站点
+DASHSCOPE_MODEL=qwen-max
+
+# Milvus 配置
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+
+# RAG 配置
+RAG_TOP_K=3
+CHUNK_MAX_SIZE=800
+CHUNK_OVERLAP=100
 ```
 
-`verdict` is how accuracy gets measured rather than assumed. Unreviewed runs count as
-unreviewed, never as correct — otherwise the false-confidence rate improves whenever nobody
-is checking.
+## 🎯 AIOps 智能运维
 
-## Layout
+基于 **Plan-Execute-Replan** 模式实现自动故障诊断。
 
-```
-app/
-├── domain/      facts: deployment shards, alert registry, repo list, source contracts
-├── evidence/    deterministic measurement. no model calls, ever.
-├── graph/       the LangGraph: nodes, guards, state
-├── tools/       local + MCP tools, wrapped with provenance at load
-├── render/      the one renderer. every banner is computed here.
-├── slack/       Socket Mode adapter: routing, threads, progress, dedupe
-├── api/         FastAPI: health, SSE triage, admin
-└── storage/     run records (async psycopg)
-mcp_servers/     Grafana, and the ported fixtures — where synchronous I/O is allowed to live
-config/          the domain tables, as data
-```
+### 核心特性
+- ✅ 自动制定诊断计划（Planner）
+- ✅ 智能工具调用（Executor）
+- ✅ 动态调整步骤（Replanner）
+- ✅ 流式输出诊断过程
+- ✅ 生成结构化报告
 
-Five import contracts in `.importlinter` keep that layering from decaying into an
-intention: domain may not import the graph, the graph may not read the record store,
-adapters may not reach past `build_graph` into a node, and no synchronous client may be
-constructed inside `app/graph` or `app/evidence`.
-
-## Tests
+### 快速测试
 
 ```bash
-uv run pytest
+# 服务已通过 make init 自动启动
+# 如需重启服务：make restart
+
+# 访问 Web 界面，点击"智能运维与诊断工具"
+# 或使用 API
+curl -X POST "http://localhost:9900/api/aiops" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test"}' \
+  --no-buffer
 ```
 
-The suite covers everything that does not need a model. The load-bearing ones are in
-§9 of the rewrite spec: a table mapping each guarantee to the mechanism that enforces it and
-the test name that fails when it decays. `test_baseline_signature_is_frozen` is the shape of
-the whole idea — it asserts a function signature, so widening the evidence floor's inputs
-fails CI rather than a code review.
+### 诊断流程
+```
+1. Planner 制定计划 → 生成 4-6 个诊断步骤
+2. Executor 执行步骤 → 调用 MCP 工具（日志查询、监控数据）
+3. Replanner 评估结果 → 决定继续/调整/生成报告
+4. 输出诊断报告 → 根因分析 + 运维建议
+```
+
+## 📝 开发指南
+
+### 常用命令
+
+```bash
+# 项目管理
+make init              # 一键初始化（Docker + 服务 + 文档）
+make start             # 启动所有服务
+make stop              # 停止所有服务
+make restart           # 重启所有服务
+
+# 依赖管理
+make install-dev       # 安装开发依赖
+make sync              # 同步依赖
+
+# Docker 管理
+make up                # 启动 Docker 容器
+make down              # 停止 Docker 容器
+
+# 代码质量
+make format            # 格式化代码
+make lint              # 代码检查
+```
+
+
+## 🐛 常见问题
+
+### Windows 环境问题
+
+#### 1. `make` 命令不可用
+Windows 不支持 `make` 命令，请使用提供的批处理脚本：
+```powershell
+# 启动服务
+.\start-windows.bat
+
+# 停止服务
+.\stop-windows.bat
+```
+
+#### 2. PowerShell 执行策略限制
+如果遇到 "无法加载文件，因为在此系统上禁止运行脚本" 错误：
+```powershell
+# 临时允许脚本执行（管理员权限）
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+
+# 或者使用 CMD 而不是 PowerShell
+cmd
+.\start-windows.bat
+```
+
+#### 3. 端口被占用（Windows）
+```powershell
+# 查看占用端口的进程
+netstat -ano | findstr :9900
+
+# 结束进程（替换 PID 为实际进程 ID）
+taskkill /F /PID <PID>
+```
+
+### 通用问题
+
+### API Key 错误
+```bash
+# 检查环境变量
+cat .env | grep DASHSCOPE_API_KEY    # Linux/macOS
+type .env | findstr DASHSCOPE_API_KEY  # Windows
+```
+
+### Milvus 连接失败
+```bash
+# 确保本机有 Docker 服务并且已经启动（可以使用 Docker Desktop）
+
+# 检查 Milvus 状态
+docker ps | grep milvus
+
+# 重启 Milvus（使用 docker compose）
+docker compose -f vector-database.yml restart
+
+# 或者重启单个服务
+docker compose -f vector-database.yml restart standalone
+```
+
+### 服务无法启动
+
+**Linux/macOS:**
+```bash
+# 查看服务日志
+tail -f logs/app_$(date +%Y-%m-%d).log  # FastAPI 主服务（Loguru 日志）
+tail -f mcp_cls.log                      # CLS MCP 服务
+tail -f mcp_monitor.log                  # Monitor MCP 服务
+
+# 检查端口占用
+lsof -i :9900  # FastAPI
+lsof -i :8003  # CLS MCP
+lsof -i :8004  # Monitor MCP
+```
+
+**Windows:**
+```powershell
+# 查看服务日志（获取今天的日期）
+$today = Get-Date -Format "yyyy-MM-dd"
+type logs\app_$today.log  # FastAPI 主服务（Loguru 日志）
+type mcp_cls.log          # CLS MCP 服务
+type mcp_monitor.log      # Monitor MCP 服务
+
+# 或者查看最新的日志文件
+Get-ChildItem logs\*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content -Tail 50
+
+# 检查端口占用
+netstat -ano | findstr :9900  # FastAPI
+netstat -ano | findstr :8003  # CLS MCP
+netstat -ano | findstr :8004  # Monitor MCP
+```
+
+## 📚 参考资源
+
+- [FastAPI 文档](https://fastapi.tiangolo.com/)
+- [LangChain 文档](https://python.langchain.com/)
+- [LangGraph Plan-Execute](https://langchain-ai.github.io/langgraph/tutorials/plan-and-execute/)
+- [阿里云 DashScope](https://dashscope.aliyun.com/)
+- [MCP 协议](https://modelcontextprotocol.io/)
+
+## 📄 许可证
+author： chief
+
+MIT License
