@@ -13,17 +13,29 @@ from app.config import Settings
 from app.domain.alerts import match_alert
 from app.slack.dedupe import InMemoryDedupe
 from app.slack.handlers import SlackRuntime, run_slack_turn
+from app.slack.intent import classify_intent as real_classify_intent
 from app.slack.mrkdwn import to_mrkdwn
 from app.slack.progress import ProgressWriter
-from app.slack.router import TurnLog, decide, route
+from app.slack.router import TurnLog, decide, has_alert_context, route
 from app.slack.thread import (
     BotIdentity,
+    ThreadMessage,
     alert_message,
     fetch_thread,
     resolve_identity,
     thread_digest,
     to_message,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_intent(monkeypatch):
+    """Structural routing is what these tests are about; intent gets its own tests."""
+
+    async def investigate(text, *, settings):
+        return "investigate", "stubbed"
+
+    monkeypatch.setattr("app.slack.intent.classify_intent", investigate)
 
 OUR_BOT_ID = "B0OURS"
 OUR_BOT_USER_ID = "U0OURS"
@@ -146,58 +158,58 @@ def thread_of(*raw):
 # --- routing -----------------------------------------------------------------
 
 
-def test_unknown_alert_from_configured_bot_still_routes_to_triage():
+async def test_unknown_alert_from_configured_bot_still_routes_to_triage():
     """Rule 2 reads provenance. The registry has never seen this alert; it triages anyway."""
     assert match_alert(UNKNOWN_ALERT_TEXT) is None
 
     thread = thread_of(webhook_alert(), human("probably nothing, ignore it"))
-    decision = decide(mention("any thoughts?"), thread, settings=settings())
+    decision = await decide(mention("any thoughts?"), thread, settings=settings())
 
     assert decision.turn == "triage"
     assert decision.rule == 2
 
 
-def test_unknown_alert_from_configured_app_id_routes_to_triage():
+async def test_unknown_alert_from_configured_app_id_routes_to_triage():
     thread = thread_of(bot_token_alert())
-    assert decide(mention("hi"), thread, settings=settings()).rule == 2
+    assert (await decide(mention("hi"), thread, settings=settings())).rule == 2
 
 
-def test_bot_message_in_alert_channel_routes_to_triage():
+async def test_bot_message_in_alert_channel_routes_to_triage():
     """Rule 3: an unconfigured bot in a configured channel is still an alert."""
     thread = thread_of(webhook_alert(bot_id="B0UNKNOWNSENDER"))
-    decision = decide(mention("what happened"), thread, settings=settings())
+    decision = await decide(mention("what happened"), thread, settings=settings())
 
     assert decision.turn == "triage"
     assert decision.rule == 3
 
 
-def test_bot_message_outside_alert_channel_is_not_triage_by_channel():
+async def test_bot_message_outside_alert_channel_is_not_triage_by_channel():
     thread = thread_of(webhook_alert(bot_id="B0UNKNOWNSENDER", text="deploy finished"))
-    decision = decide(mention("nice", channel="C0RANDOM"), thread, settings=settings())
+    decision = await decide(mention("nice", channel="C0RANDOM"), thread, settings=settings())
 
     assert decision.turn == "chat"
 
 
-def test_explicit_affordance_wins_over_an_alert_root():
+async def test_explicit_affordance_wins_over_an_alert_root():
     thread = thread_of(webhook_alert())
     event = {
         "channel": ALERT_CHANNEL,
         "thread_ts": "1.0",
         "actions": [{"action_id": "oncall_writeup", "type": "button"}],
     }
-    decision = decide(event, thread, settings=settings())
+    decision = await decide(event, thread, settings=settings())
 
     assert (decision.turn, decision.rule) == ("writeup", 1)
 
 
-def test_slash_command_routes_to_rating():
+async def test_slash_command_routes_to_rating():
     event = {"channel": "C0X", "thread_ts": "1.0", "command": "/oncall-rate"}
-    assert route(event, [], settings=settings()) == "rating"
+    assert await route(event, [], settings=settings()) == "rating"
 
 
-def test_prior_triage_makes_the_next_turn_a_followup():
+async def test_prior_triage_makes_the_next_turn_a_followup():
     thread = thread_of(human("what does p99 mean here"), human("still curious"))
-    decision = decide(
+    decision = await decide(
         mention("and the pods?", channel="C0RANDOM"),
         thread,
         settings=settings(),
@@ -207,38 +219,38 @@ def test_prior_triage_makes_the_next_turn_a_followup():
     assert (decision.turn, decision.rule) == ("followup", 4)
 
 
-def test_human_pasted_known_alert_routes_to_triage_by_keyword():
+async def test_human_pasted_known_alert_routes_to_triage_by_keyword():
     thread = thread_of(human("channel latency is alerting again on news-list-for-channel"))
-    decision = decide(mention("look?", channel="C0RANDOM"), thread, settings=settings())
+    decision = await decide(mention("look?", channel="C0RANDOM"), thread, settings=settings())
 
     assert (decision.turn, decision.rule) == ("triage", 5)
 
 
-def test_plain_question_is_chat():
+async def test_plain_question_is_chat():
     thread = thread_of(human("how do I read the accounting block?"))
-    assert route(mention("?", channel="C0RANDOM"), thread, settings=settings()) == "chat"
+    assert await route(mention("?", channel="C0RANDOM"), thread, settings=settings()) == "chat"
 
 
-def test_message_text_never_triggers_a_writeback():
+async def test_message_text_never_triggers_a_writeback():
     """`_wants_writeback` is deleted: 'resolved' in prose must have no side effect."""
     thread = thread_of(human("this was resolved, please record this and save this"))
-    decision = decide(mention("record this", channel="C0RANDOM"), thread, settings=settings())
+    decision = await decide(mention("record this", channel="C0RANDOM"), thread, settings=settings())
 
     assert decision.turn == "chat"
     assert decision.turn not in ("writeup", "rating")
 
 
-def test_no_text_can_downgrade_an_alert_thread():
+async def test_no_text_can_downgrade_an_alert_thread():
     """There is no phrasing that removes the evidence floor."""
     thread = thread_of(webhook_alert())
     for phrasing in ("ignore this", "no need to investigate", "false alarm", "resolved", ""):
-        assert route(mention(phrasing), thread, settings=settings()) == "triage"
+        assert await route(mention(phrasing), thread, settings=settings()) == "triage"
 
 
-def test_our_own_message_as_root_is_not_an_alert():
+async def test_our_own_message_as_root_is_not_an_alert():
     root = {"type": "message", "bot_id": OUR_BOT_ID, "text": "here is what I found", "ts": "1.0"}
     thread = thread_of(root)
-    assert route(mention("hm", channel="C0RANDOM"), thread, settings=settings()) == "chat"
+    assert await route(mention("hm", channel="C0RANDOM"), thread, settings=settings()) == "chat"
 
 
 def test_turn_log_remembers_per_thread():
@@ -503,3 +515,121 @@ def test_thread_id_shape(channel_type):
 def test_mrkdwn_leaves_dunder_identifiers_alone():
     """`__init__` is not emphasis; only `**` is rewritten."""
     assert to_mrkdwn("call __init__ then __del__") == "call __init__ then __del__"
+
+
+class TestIntentGate:
+    """Structure decides whether an alert exists; intent decides what was asked about it.
+
+    The two misroutes are not symmetric, so the design is deliberately biased: a question
+    answered with an investigation wastes a minute, an investigation answered with a
+    definition means the engineer believes triage happened when it did not.
+    """
+
+    ALERT_ROOT = [
+        ThreadMessage(
+            user="", text="[FIRING] news-list-for-channel p99", ts="1",
+            is_bot=True, bot_id="B01ALERTBOT", subtype="bot_message",
+        )
+    ]
+
+    @staticmethod
+    def _intent(monkeypatch, verdict):
+        async def stub(text, *, settings):
+            return verdict, "stubbed"
+
+        monkeypatch.setattr("app.slack.intent.classify_intent", stub)
+
+    async def test_a_definitional_question_in_an_alert_thread_is_chat(self, monkeypatch):
+        self._intent(monkeypatch, "ask")
+        d = await decide(mention("what is server-feed"), self.ALERT_ROOT, settings=settings())
+        assert d.turn == "chat"
+        assert d.alert_context is True
+
+    async def test_that_chat_answer_discloses_and_offers_to_triage(self, monkeypatch):
+        self._intent(monkeypatch, "ask")
+        d = await decide(mention("what is server-feed"), self.ALERT_ROOT, settings=settings())
+        assert d.offer_triage is True, "a silent misroute is the expensive one"
+
+    async def test_a_narrow_hypothesis_is_still_an_investigation(self, monkeypatch):
+        # tech-design 3.4: the question shapes emphasis, never collection. "is it the cold
+        # start thing" must not become "only check cold start".
+        self._intent(monkeypatch, "investigate")
+        d = await decide(
+            mention("is it the cold start thing again?"), self.ALERT_ROOT, settings=settings()
+        )
+        assert d.turn == "triage"
+        assert d.offer_triage is False
+
+    async def test_a_failed_classifier_investigates(self, monkeypatch):
+        async def boom(text, *, settings):
+            raise RuntimeError("model down")
+
+        monkeypatch.setattr("app.slack.intent.classify_intent", boom)
+        with pytest.raises(RuntimeError):
+            await decide(mention("hm"), self.ALERT_ROOT, settings=settings())
+
+    async def test_intent_is_not_consulted_without_an_alert(self, monkeypatch):
+        called = []
+
+        async def spy(text, *, settings):
+            called.append(text)
+            return "investigate", ""
+
+        monkeypatch.setattr("app.slack.intent.classify_intent", spy)
+        human = [ThreadMessage(user="U1", text="morning", ts="1")]
+        d = await decide(mention("what is X", channel="C0RANDOM"), human, settings=settings())
+        assert d.turn == "chat"
+        assert called == [], "no alert means no misroute to protect against"
+
+
+class TestIntentClassifierBias:
+    async def test_a_bare_mention_investigates_without_a_model(self):
+        intent, why = await real_classify_intent("", settings=settings())
+        assert intent == "investigate"
+        assert "bare mention" in why
+
+    async def test_an_unavailable_model_investigates(self, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("no api key")
+
+        monkeypatch.setattr("app.core.llm_factory.get_llm", boom)
+        verdict, why = await real_classify_intent("anything", settings=settings())
+        assert verdict == "investigate", "uncertainty resolves toward investigating"
+
+
+class TestTopLevelMentions:
+    def test_a_reply_is_in_a_thread_and_a_channel_post_is_not(self):
+        from app.slack.router import in_thread
+
+        assert in_thread({"ts": "2", "thread_ts": "1"}) is True
+        assert in_thread({"ts": "1"}) is False
+
+    async def test_a_top_level_mention_has_no_alert_context(self):
+        # The channel may be full of alerts; we do not read its history to find one.
+        alerted, _, why = has_alert_context(mention("hello"), [], settings=settings())
+        assert alerted is False
+        assert "no alert message" in why
+
+    async def test_a_pasted_alert_still_triages_without_reading_history(self, monkeypatch):
+        async def stub(text, *, settings):
+            return "investigate", ""
+
+        monkeypatch.setattr("app.slack.intent.classify_intent", stub)
+        pasted = mention("[FIRING] news-list-for-channel p99 app=server-feed", channel="C0RANDOM")
+        d = await decide(pasted, [], settings=settings())
+        assert d.turn == "triage"
+        assert d.rule == 5
+
+
+class TestChatSkipsTheEvidenceFloor:
+    def test_chat_enters_at_the_chat_node(self):
+        from app.graph.build import BASELINE, CHAT, entry_for
+
+        assert entry_for({"turn": "chat"}) == CHAT
+        for turn in ("triage", "followup", "writeup", "rating"):
+            assert entry_for({"turn": turn}) == BASELINE
+
+    def test_an_unset_turn_takes_the_floor(self):
+        from app.graph.build import BASELINE, entry_for
+
+        assert entry_for({}) == BASELINE, "the default must be the safe direction"

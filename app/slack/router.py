@@ -37,6 +37,10 @@ class Decision(BaseModel):
     turn: Turn
     rule: int
     because: str
+    alert_context: bool = False
+    offer_triage: bool = False
+    """Chat was chosen inside an alert thread. The reply must say so and offer to triage:
+    a misroute the engineer can correct in one word is a nuisance, a silent one is not."""
 
 
 class TurnLog:
@@ -87,57 +91,105 @@ def _root(thread: Sequence[ThreadMessage], event: dict[str, Any]) -> ThreadMessa
     return None
 
 
-def decide(
+def has_alert_context(
     event: dict[str, Any],
     thread: Sequence[ThreadMessage] = (),
     *,
     settings: Settings | None = None,
     prior_turns: Sequence[str] = (),
-) -> Decision:
-    """Apply the six rules in order, short-circuiting on the first hit."""
-    settings = settings or get_settings()
+) -> tuple[bool, int, str]:
+    """Does this thread hang off an alert? A fact, answered from Slack metadata.
 
-    explicit = affordance(event)
-    if explicit is not None:
-        return Decision(turn=explicit, rule=1, because=f"explicit {explicit} affordance")
+    Deliberately not "do I recognise this alert" — provenance does not depend on the
+    registry, so an alert nobody has catalogued still gets the evidence floor. The keyword
+    table is consulted last, and only for an alert a human pasted in by hand.
+    """
+    settings = settings or get_settings()
 
     root = _root(thread, event)
     if root is not None and not root.is_us:
         if root.bot_id and root.bot_id in set(settings.slack_alert_bot_ids):
-            return Decision(
-                turn="triage", rule=2, because=f"root bot_id {root.bot_id} is an alert sender"
-            )
+            return True, 2, f"root bot_id {root.bot_id} is an alert sender"
         if root.app_id and root.app_id in set(settings.slack_alert_app_ids):
-            return Decision(
-                turn="triage", rule=2, because=f"root app_id {root.app_id} is an alert sender"
-            )
+            return True, 2, f"root app_id {root.app_id} is an alert sender"
         if root.is_bot and event.get("channel") in set(settings.slack_alert_channels):
-            return Decision(
-                turn="triage",
-                rule=3,
-                because=f"bot message in alert channel {event.get('channel')}",
-            )
+            return True, 3, f"bot message in alert channel {event.get('channel')}"
 
-    if "triage" in tuple(prior_turns):
-        return Decision(turn="followup", rule=4, because="this thread was already triaged")
+    if "triage" in tuple(prior_turns) or "followup" in tuple(prior_turns):
+        return True, 4, "this thread was already triaged"
 
     if root is not None and root.text:
         from app.domain.alerts import match_alert
 
         known = match_alert(root.text)
         if known is not None:
-            return Decision(turn="triage", rule=5, because=f"root text matches {known.name}")
+            return True, 5, f"root text matches {known.name}"
 
-    return Decision(turn="chat", rule=6, because="no alert message in this thread")
+    return False, 6, "no alert message in this thread"
 
 
-def route(
+def in_thread(event: dict[str, Any]) -> bool:
+    """Whether the mention is a reply inside a thread, or a new top-level message.
+
+    `thread_ts` is present only for replies. The common idiom
+    `event.get("thread_ts") or event["ts"]` is right for addressing a reply, but it makes a
+    top-level mention look like the root of a thread containing only itself — which hides
+    the difference this function exists to expose.
+    """
+    return bool(event.get("thread_ts"))
+
+
+async def decide(
+    event: dict[str, Any],
+    thread: Sequence[ThreadMessage] = (),
+    *,
+    settings: Settings | None = None,
+    prior_turns: Sequence[str] = (),
+) -> Decision:
+    """Structure first, then intent — and only ask about intent when it can matter."""
+    settings = settings or get_settings()
+
+    explicit = affordance(event)
+    if explicit is not None:
+        return Decision(turn=explicit, rule=1, because=f"explicit {explicit} affordance")
+
+    alerted, rule, why = has_alert_context(
+        event, thread, settings=settings, prior_turns=prior_turns
+    )
+
+    if not alerted:
+        # Nothing to investigate, so there is no misroute to worry about.
+        return Decision(turn="chat", rule=rule, because=why, alert_context=False)
+
+    from app.slack.intent import classify_intent
+
+    intent, reason = await classify_intent(event.get("text", ""), settings=settings)
+
+    if intent == "ask":
+        return Decision(
+            turn="chat",
+            rule=rule,
+            because=f"{why}, but the question is not about diagnosing it ({reason})",
+            alert_context=True,
+            offer_triage=True,
+        )
+
+    already = "triage" in tuple(prior_turns) or "followup" in tuple(prior_turns)
+    return Decision(
+        turn="followup" if already else "triage",
+        rule=rule,
+        because=f"{why}; intent={intent} ({reason})",
+        alert_context=True,
+    )
+
+
+async def route(
     event: dict[str, Any],
     thread: Sequence[ThreadMessage] = (),
     *,
     settings: Settings | None = None,
     prior_turns: Sequence[str] = (),
 ) -> Turn:
-    decision = decide(event, thread, settings=settings, prior_turns=prior_turns)
+    decision = await decide(event, thread, settings=settings, prior_turns=prior_turns)
     logger.debug(f"route → {decision.turn} (rule {decision.rule}: {decision.because})")
     return decision.turn

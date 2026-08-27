@@ -74,11 +74,21 @@ Every proposal routed inbound mentions through a classifier that could answer "t
 doesn't need an investigation" — and in two of them, chat was the fall-through default. That
 is precisely the failure §1.1 exists to prevent, reintroduced invisibly and with no trace.
 
-**Resolution (§6):** routing is **structural, never semantic**. The question is not *do I
-recognize this alert* — it is *does this thread contain an alert message*, answered from
-Slack metadata (`bot_id` / `app_id` / `subtype`), not from the text. A thread with an alert
-in it always gets the evidence floor, whatever the engineer typed. A thread with no alert in
-it has nothing to baseline, which is a different situation, not a skipped one.
+**Resolution (§6), revised during implementation.** The first fix was to make routing
+*purely* structural: does this thread contain an alert message, answered from Slack metadata
+rather than from the text. That half is right and it stays — it means an alert nobody has
+catalogued still gets the evidence floor.
+
+But purely structural over-triggers. "What is server-feed?" typed into an alert thread would
+buy six metric queries and a plan-execute loop to answer a definitional question. So there
+are two gates: **structure decides whether an alert exists (code), intent decides what was
+asked about it (model)** — and the second gate is made safe not by being avoided but by
+being biased and visible. Uncertainty resolves to investigate, in code; a chat answer inside
+an alert thread says so and offers to upgrade in one word.
+
+The distinction that matters: §1.1 forbids gating on *recognition* ("I don't know this
+alert, so I won't look"). It does not forbid noticing that the engineer asked something
+else. Conflating the two is what made the first version too rigid.
 
 ---
 
@@ -212,41 +222,109 @@ wall-clock, never ordering of the record.
 
 ---
 
-## 6. Routing — structural, never semantic
+## 6. Routing — facts in code, intent in the model
 
-`app/slack/router.py::route(event, thread) -> Turn`
+**Revised during implementation.** The first version of this section routed purely on
+structure: a thread containing an alert always got a full investigation, whatever the
+engineer typed. That is too blunt, and it is wrong in a case that comes up constantly.
 
-```python
-Turn = Literal["triage", "followup", "chat", "writeup", "rating"]
+An alert is firing. The engineer asks *"what is server-feed?"* — a definitional question
+they happened to type in this thread. Pure structural routing runs six metric queries and a
+plan-execute loop to answer it. Slow, noisy, and not what was asked.
+
+So there are two gates, and they answer different kinds of question.
+
+### 6.1 Gate one: is there an alert here? (code)
+
+A fact Slack already knows. Asking a model to re-derive it would be strictly worse.
+
+`has_alert_context(event, thread) -> (bool, rule, why)`, short-circuiting:
+
+| # | Test | Basis |
+|---|---|---|
+| 2 | thread root's `bot_id`/`app_id` is a configured alert sender | **provenance** |
+| 3 | root is a bot message and the channel is a configured alert channel | provenance |
+| 4 | a prior turn in this thread was triage | continuity |
+| 5 | `match_alert(root.text)` hits | keyword table, last resort |
+| 6 | otherwise | no alert |
+
+Rules 2–3 are the important ones: they read Slack metadata, so **an alert nobody has
+catalogued still gets the evidence floor**. Rule 5 exists only for an alert a human pasted
+in by hand.
+
+### 6.2 Gate two: is this message about diagnosing it? (model)
+
+Only consulted when gate one said yes — a thread with no alert has no misroute to protect
+against, so most turns never pay for this call.
+
+`classify_intent(text) -> investigate | ask`
+
+- **investigate** — including a narrow framing: *"is it the cold start thing again?"*,
+  *"CPU looks fine to me"*. A narrow question is still a request to diagnose this alert, and
+  §3.4 is explicit that the question shapes emphasis and never collection. Answering it by
+  checking only cold start is the failure §3.3 exists to prevent.
+- **ask** — the message is not about diagnosing this alert at all. *"What is server-feed"*,
+  *"what does error code 43 mean"*.
+
+Three things keep a semantic gate from becoming the §1.1 recognition gate:
+
+1. **The misroutes are not symmetric, so the bias is written in code.** Answering a question
+   with an investigation wastes a minute; answering an investigation with a definition means
+   the engineer believes triage happened when it did not. Uncertainty, an unparseable
+   verdict, an unreachable model, and an empty mention all resolve to `investigate`.
+2. **A chat answer inside an alert thread is disclosed**, with an offer to upgrade: *"I read
+   this as a question rather than a request to diagnose the alert in this thread, so I
+   haven't investigated it. Say **investigate** and I will."* A misroute the engineer can
+   correct in one word is a nuisance; a silent one is the thing worth designing against.
+3. **The judgement lives outside the graph.** No node concludes that an investigation was
+   unnecessary — `entry_for(state)` only reads a decision that was already made.
+
+### 6.3 Two shapes of work, one entry
+
+Slack has no navigation, so the *entry* must be unified. That does not mean execution has to
+be, and forcing a knowledge question through plan-execute-replan costs four model calls
+where two will do.
+
+```
+                    ┌── turn == "chat" ──► chat ──────────────────────► END
+START ── entry_for ─┤                      (tool-calling, bounded rounds)
+                    └── otherwise ───────► baseline ──► planner ──► executor
+                                           (the floor)      ▲          │
+                                                            └─ replanner ─► respond
 ```
 
-Decided in **code**. The model gets no vote on whether an investigation happens, for the
-reason in §2.3.
+Guarantees, each with a test in `tests/test_graph.py::TestWiring`:
 
-Precedence, short-circuiting:
+- the planner is reachable **only** from `baseline`
+- `chat` cannot reach the planner — it is a different shape of work, not a shortened
+  investigation that quietly lost its evidence floor
+- an unset `turn` enters at `baseline`, so the default is the safe direction
 
-| # | Test | Result | Basis |
-|---|---|---|---|
-| 1 | Explicit affordance fired (Block Kit button / slash command) | `writeup` \| `rating` | the user said so |
-| 2 | Thread root has `bot_id`/`app_id` in the configured alert senders | `triage` | **provenance, not text** |
-| 3 | Thread root is a bot message and channel is a configured alert channel | `triage` | provenance |
-| 4 | A prior run in this thread was `triage` | `followup` | continuity |
-| 5 | `match_alert(root.text)` hits | `triage` | keyword table, last resort |
-| 6 | otherwise | `chat` | no alert exists to baseline |
+### 6.4 A mention in a channel is not a thread
 
-Rules 2–3 are the important ones: they read **Slack metadata**, so an alert the registry has
-never seen still routes to `triage`. Rule 5 exists only for alerts pasted by a human.
+`thread_ts` is present only on a reply. The common idiom
+`thread_ts = event.get("thread_ts") or event["ts"]` is right for *addressing* a reply, but it
+makes a top-level mention look like the root of a thread containing only itself — which
+hides exactly the distinction routing depends on. `in_thread(event)` reports it explicitly.
+
+**The agent reads one thread, never a channel.** `conversations.replies` is thread-scoped and
+bounded at `slack_thread_limit`; `conversations.history` is not used on the default path. A
+busy incident channel may hold five unrelated alerts, and pulling them in would dilute the
+evidence and manufacture ambiguity about which one was being asked about.
+
+Two real cases survive that rule:
+
+- **An alert pasted into the mention itself** routes to triage via rule 5. No history needed.
+- **A top-level mention that seems to reference a recent alert**, in a configured alert
+  channel, produces an *offer* — "this channel had a `news-list-for-channel` alert 5 minutes
+  ago; is that the one?" — never an assumption. Bounded to recent bot messages, in alert
+  channels only, and only as a suggestion.
+
+### 6.5 Side effects need an affordance, not a word
 
 `_wants_writeback()` substring matching (`"record this"`, `"resolved"`) is **deleted**. A
-message containing the word "resolved" must never trigger a side effect. Write-up and rating
-arrive through explicit Block Kit affordances carrying `invocation_id`.
-
-**`chat` is not a bypass.** A `chat` turn still has tools and still records a run. What it
-lacks is an alert to establish a floor for. If a `chat` turn's own reasoning surfaces an
-alert reference, the router does not retroactively upgrade it — the reply says so and offers
-the affordance, because a mid-turn upgrade would be exactly the semantic gate §2.3 rejects.
-
----
+sentence containing the word "resolved" must not be able to open a pull request. Write-up and
+rating arrive through Block Kit affordances carrying an `invocation_id`.
 
 ## 7. The tool layer
 
@@ -441,6 +519,12 @@ mechanism is "the prompt says so" is not on this list.
 | 16 | Runs are recorded, never retrieved | `app/storage` has no read path reachable from `app/graph` | import-linter contract |
 | 17 | Unreviewed ≠ correct | `verdict IS NULL` excluded from rates | `test_unreviewed_excluded_from_stats` |
 | 18 | One @-mention = one investigation | `slack_events` dedupe (§8.2) | `test_duplicate_event_id_is_dropped` |
+| 20 | Uncertain intent investigates | classifier failure / bare mention / bad verdict all return `investigate` in code | `test_an_unavailable_model_investigates`, `test_a_bare_mention_investigates_without_a_model` |
+| 21 | A chat answer in an alert thread is disclosed | `Decision.offer_triage` → the reply appends the offer | `test_that_chat_answer_discloses_and_offers_to_triage` |
+| 22 | Chat is not a shortened investigation | `chat` node has no edge to the planner | `test_chat_cannot_reach_the_planner` |
+| 23 | A narrow question does not narrow collection | intent returns `investigate` for hypothesis-shaped questions | `test_a_narrow_hypothesis_is_still_an_investigation` |
+| 24 | Intent is not consulted without an alert | gate two runs only when gate one passed | `test_intent_is_not_consulted_without_an_alert` |
+| 25 | A channel is never read as if it were a thread | `conversations.replies` only on the default path | `test_a_top_level_mention_has_no_alert_context` |
 | 19 | Banners are computed once | only `app/render/answer.py` emits them; adapters call it | import-linter: no adapter builds banner strings |
 
 Item 19 deserves its own note. In the old repo every banner — sample data, unconfirmed

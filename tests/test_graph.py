@@ -125,13 +125,32 @@ class TestWiring:
         graph = build_graph(settings())
         assert graph is not None
 
-    def test_baseline_cannot_be_routed_around(self):
+    def test_planner_is_reachable_only_through_the_baseline(self):
         edges = build_graph(settings()).get_graph().edges
         into_planner = {e.source for e in edges if e.target == PLANNER}
         assert into_planner == {BASELINE}, f"planner reachable from {into_planner}"
 
+    def test_the_only_entrypoints_are_the_floor_and_chat(self):
+        from app.graph.build import CHAT
+
+        edges = build_graph(settings()).get_graph().edges
         entrypoints = {e.target for e in edges if e.source == "__start__"}
-        assert entrypoints == {BASELINE}
+        assert entrypoints == {BASELINE, CHAT}
+
+    def test_chat_cannot_reach_the_planner(self):
+        # Chat is a different shape of work, not a shortened investigation. If it could
+        # reach the planner it would become one, without the evidence floor underneath.
+        from app.graph.build import CHAT
+
+        edges = build_graph(settings()).get_graph().edges
+        assert {e.target for e in edges if e.source == CHAT} == {"__end__"}
+
+    def test_every_investigating_turn_enters_at_the_floor(self):
+        from app.graph.build import BASELINE as FLOOR
+        from app.graph.build import entry_for
+
+        for turn in ("triage", "followup", "writeup", "rating", None):
+            assert entry_for({"turn": turn} if turn else {}) == FLOOR
 
 
 class TestBudget:

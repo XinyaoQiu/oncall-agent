@@ -129,7 +129,7 @@ async def run_slack_turn(
             logger.warning(f"thread fetch failed for {thread_id}: {exc}")
             messages = []
 
-        decision = decide(
+        decision = await decide(
             event, messages, settings=settings, prior_turns=runtime.turns.turns(thread_id)
         )
         logger.info(f"{thread_id} → {decision.turn} (rule {decision.rule}: {decision.because})")
@@ -176,6 +176,16 @@ async def run_slack_turn(
         if not answer:
             reason = failure or "no answer was produced"
             answer = f":warning: I could not finish this one — {reason}"
+
+        if decision.offer_triage:
+            # A chat answer inside an alert thread is a routing judgement, and the engineer
+            # is the one who can overrule it in a word. Saying nothing would make the
+            # misroute invisible, which is the only version of it that is expensive.
+            answer += (
+                "\n\n_I read this as a question rather than a request to diagnose the "
+                "alert in this thread, so I haven't investigated it. Say *investigate* "
+                "and I will._"
+            )
 
         text = to_mrkdwn(answer)
         await progress.finish(text)

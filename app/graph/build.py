@@ -65,20 +65,39 @@ def tool_loader(settings: Settings) -> ToolLoader:
     return load
 
 
+CHAT = "chat"
+
+
+def entry_for(state: OncallState) -> str:
+    """Which shape of work this turn is.
+
+    The branch is read from state, decided upstream by app/slack/router.py: structure
+    (does this thread hang off an alert) and then intent, with uncertainty resolving to
+    triage. Nothing inside the graph gets to conclude that an investigation was
+    unnecessary — that judgement is exactly what tech-design §1.1 forbids, and keeping it
+    outside is what makes a separate chat path safe.
+    """
+    return CHAT if state.get("turn") == "chat" else BASELINE
+
+
 def build_graph(settings: Settings, *, checkpointer: Any = None) -> Any:
-    """Compile the plan-execute-replan graph. Called once per process, not per turn."""
+    """Compile both shapes into one graph: triage plans, chat answers."""
     from langgraph.graph import END, START, StateGraph
+
+    from app.graph.nodes.chat import chat_node
 
     load = tool_loader(settings)
     graph = StateGraph(OncallState)
 
+    graph.add_node(CHAT, chat_node(settings, load))
     graph.add_node(BASELINE, baseline_node(settings, load))
     graph.add_node(PLANNER, planner_node(settings, load))
     graph.add_node(EXECUTOR, executor_node(settings, load))
     graph.add_node(REPLANNER, replanner_node(settings, load))
     graph.add_node(RESPOND, respond_node(settings))
 
-    graph.add_edge(START, BASELINE)
+    graph.add_conditional_edges(START, entry_for, {CHAT: CHAT, BASELINE: BASELINE})
+    graph.add_edge(CHAT, END)
     graph.add_edge(BASELINE, PLANNER)
     graph.add_edge(PLANNER, EXECUTOR)
     graph.add_edge(EXECUTOR, REPLANNER)
@@ -88,7 +107,10 @@ def build_graph(settings: Settings, *, checkpointer: Any = None) -> Any:
     graph.add_edge(RESPOND, END)
 
     compiled = graph.compile(checkpointer=checkpointer)
-    logger.info("graph compiled: baseline → planner → executor → replanner → respond")
+    logger.info(
+        "graph compiled: triage = baseline → planner → executor → replanner → respond; "
+        "chat = chat → end"
+    )
     return compiled
 
 
