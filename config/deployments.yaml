@@ -1,0 +1,47 @@
+# The server binary is ONE artifact deployed as several path-scoped deployments.
+# Mapping an alert's host/path to one of them is a lookup, not a search.
+# Ported from src/oncall_agent/config.py:DEPLOYMENTS.
+deployments:
+- app_label: server-default
+  pod_pattern: server-default-*
+  hosts:
+  - api.newsbreak.com
+  path_prefixes:
+  - /
+  replicas: 40
+  traffic_share: catch-all
+  code_route_paths:
+  - server/router/default.go
+- app_label: server-a4api-web
+  pod_pattern: server-a4api-web-*
+  hosts:
+  - www.newsbreak.com
+  path_prefixes:
+  - /Website/web/
+  replicas: 12
+  traffic_share: web entry
+  code_route_paths:
+  - server/router/web.go
+- app_label: server-feed
+  pod_pattern: server-feed-*
+  hosts:
+  - api.newsbreak.com
+  path_prefixes:
+  - /Website/channel/
+  - /Website/news/
+  replicas: 60
+  traffic_share: ~90% of feed traffic
+  code_route_paths:
+  - server/router/feed.go
+  - server/controller/feed/
+- app_label: server-a4api-default
+  pod_pattern: server-a4api-default-*
+  hosts:
+  - api.newsbreak.com
+  path_prefixes:
+  - /Website/profile/
+  - /Website/user/
+  replicas: 20
+  traffic_share: ~10% of feed traffic
+  code_route_paths:
+  - server/router/a4api.go

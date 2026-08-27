@@ -1,0 +1,78 @@
+# What each tool's results mean. Consumed by app/domain/sources.py and applied at tool
+# load time by app/tools/registry.py.
+#
+# A tool absent from this file is qualitative and is never an impact source. That default
+# is the point: adding an MCP server must not be able to silently add one.
+sources:
+  # --- authoritative for impact -------------------------------------------
+  quantify_impact:
+    system: ingress
+    usable_for: [impact_quantification, qualitative_breakdown]
+    note: ingress request counts; unsampled
+
+  # --- metrics --------------------------------------------------------------
+  query_metric:
+    system: grafana
+    usable_for: [qualitative_breakdown, trend, correlation]
+    not_usable_for: [impact_quantification]
+    note: metric series; use ingress counts for user impact
+  fetch_alert_rule:
+    system: grafana
+    usable_for: [rule_definition]
+
+  # --- logs: the trap this table exists for ---------------------------------
+  search_server_logs:
+    system: server_logs
+    sampling_rate: ~1/8
+    retention: ~7d
+    usable_for: [qualitative_breakdown, trace_following]
+    not_usable_for: [impact_quantification]
+    note: understates counts roughly 8x; a count from here is not an impact number
+  search_lb_access_logs:
+    system: lb_access_logs
+    retention: ~6d
+    usable_for: [impact_quantification, qualitative_breakdown]
+    note: ingress-level; authoritative for request counts
+
+  # --- ported fixtures: synthetic, and flagged so nothing presents them as real
+  query_cpu_metrics:
+    system: monitor_fixture
+    synthetic: true
+    usable_for: [demo]
+    not_usable_for: [impact_quantification, diagnosis]
+  query_memory_metrics:
+    system: monitor_fixture
+    synthetic: true
+    usable_for: [demo]
+    not_usable_for: [impact_quantification, diagnosis]
+  search_log:
+    system: cls_fixture
+    synthetic: true
+    usable_for: [demo]
+    not_usable_for: [impact_quantification, diagnosis]
+    note: returns at most `limit` rows; its total is a row count, not an event count
+
+  # --- local, non-measurement -----------------------------------------------
+  retrieve_knowledge:
+    system: milvus
+    usable_for: [hypothesis, precedent]
+    not_usable_for: [impact_quantification, measurement]
+    note: a runbook says what to check, not what happened
+  search_code:
+    system: repo
+    usable_for: [code_localization]
+  read_file:
+    system: repo
+    usable_for: [code_localization]
+  git_log:
+    system: repo
+    usable_for: [change_correlation]
+  list_dir:
+    system: repo
+    usable_for: [code_localization]
+  resolve_deployment:
+    system: shard_table
+    usable_for: [service_identification]
+  blast_radius:
+    system: shard_table
+    usable_for: [service_identification]

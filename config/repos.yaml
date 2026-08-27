@@ -1,0 +1,45 @@
+# Repos the agent may search. rank_for() ORDERS these; it never filters — a cause
+# outside the alerting service's repo is exactly the case that is hard to find.
+repos:
+- name: server
+  path: ${REPO_ROOT}/server
+  language: go
+  description: main API binary, deployed as several path-scoped deployments
+  owns_services:
+  - server-default
+  - server-feed
+  - server-a4api-web
+  - server-a4api-default
+- name: local-server
+  path: ${REPO_ROOT}/local-server
+  language: go
+  description: local/POI services (gas stations, weather)
+  owns_services:
+  - local-server
+- name: rec-knowledge
+  path: ${REPO_ROOT}/rec-knowledge
+  language: markdown
+  description: incident write-ups and runbooks
+  owns_services: []
+- name: sre-configs
+  path: ${REPO_ROOT}/sre-configs
+  language: yaml
+  description: ingress, HPA and deployment configuration
+  owns_services: []
+- name: api-schema
+  path: ${REPO_ROOT}/api-schema
+  language: protobuf
+  description: shared request/response schemas
+  owns_services: []
+exclude_dirs:
+- vendor
+- node_modules
+- .git
+- testdata
+- mocks
+- generated
+exclude_globs:
+- '*.pb.go'
+- '*_test.go'
+- '*.min.js'
+- '*.lock'

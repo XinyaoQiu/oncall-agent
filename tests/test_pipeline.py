@@ -3,9 +3,8 @@
 import pytest
 
 from oncall_agent.alerts import get_alert, match_alert
-from oncall_agent.analysis import evidence
+from oncall_agent.analysis import diagnose, evidence
 from oncall_agent.analysis.identify import extract_labels, identify
-from oncall_agent.analysis import diagnose
 from oncall_agent.config import (
     Settings,
     resolve,
@@ -499,8 +498,9 @@ class TestInvestigationLoop:
     """Budgets and guards are enforced in the loop, where the model has no vote."""
 
     def _registry(self):
-        from oncall_agent.repos import Repo, RepoRegistry
         from pathlib import Path
+
+        from oncall_agent.repos import Repo, RepoRegistry
 
         return RepoRegistry(repos=[Repo(name="server", path=Path("/tmp"))])
 
@@ -576,8 +576,9 @@ class TestInvestigationLoop:
 
 class TestRepoRegistry:
     def test_owning_repo_is_ranked_first(self):
-        from oncall_agent.repos import Repo, RepoRegistry
         from pathlib import Path
+
+        from oncall_agent.repos import Repo, RepoRegistry
 
         registry = RepoRegistry(repos=[
             Repo(name="other", path=Path("/tmp")),
@@ -586,8 +587,9 @@ class TestRepoRegistry:
         assert registry.rank_for("server-feed")[0].name == "server"
 
     def test_unowned_repos_are_ranked_not_removed(self):
-        from oncall_agent.repos import Repo, RepoRegistry
         from pathlib import Path
+
+        from oncall_agent.repos import Repo, RepoRegistry
 
         registry = RepoRegistry(repos=[
             Repo(name="other", path=Path("/tmp")),
@@ -606,8 +608,9 @@ class TestPartialFindings:
     """
 
     def _registry(self):
-        from oncall_agent.repos import Repo, RepoRegistry
         from pathlib import Path
+
+        from oncall_agent.repos import Repo, RepoRegistry
 
         return RepoRegistry(repos=[Repo(name="server", path=Path("/tmp"))])
 
