@@ -2,15 +2,15 @@
 
 The 3-second deadline applies to Socket Mode exactly as it does to the Events API, so
 `ack()` is the first statement in every listener and nothing that touches Grafana, Milvus or
-an LLM runs before it (spec §8.1). The turn itself is an `asyncio.Task`.
+an LLM runs before it (spec §8). The turn itself is an `asyncio.Task`.
 
 That task catches everything. Failing more than 95% of deliveries in an hour disables the
-app's event subscriptions and needs a manual re-enable (spec §4), so an exception here is
+app's event subscriptions and needs a manual re-enable (spec §7.1), so an exception here is
 posted into the thread rather than allowed to escape and crash-loop the process — a bot that
 says "that failed" is recoverable, a bot Slack has switched off is not.
 
-No banner strings are built here. Spec §9 item 19: there is exactly one renderer, and this
-adapter's only contribution is the markup argument and the mrkdwn rewrite.
+No banner strings are built here. There is exactly one renderer — `mrkdwn.to_mrkdwn`
+(tech-design §5.7) — and this adapter's only contribution is the mrkdwn rewrite.
 """
 
 import asyncio

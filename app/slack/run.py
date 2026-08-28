@@ -1,6 +1,6 @@
 """`oncall-slackd`: the Socket Mode process.
 
-It owns the WebSocket and nothing else. Spec §2.2: the bolt maintainer's own advice is that
+It owns the WebSocket and nothing else. Spec §7: the bolt maintainer's own advice is that
 sharing one event loop between a web app and the Socket Mode client is not supported, and
 the lifespan workaround breaks outright under `uvicorn --workers > 1`, where every replica
 opens its own connection and processes every event N times. So `oncall-api` is a separate
@@ -8,7 +8,7 @@ process; each service keeps its own conversation memory, keyed by the Slack thre
 
 Both identifiers are resolved here, once, from `auth.test` — `bot_id` (`B…`) and
 `bot_user_id` (`U…`) — because everything downstream that asks "did we write this" needs the
-right one and neither is ever equal to the other (spec §8.4).
+right one and neither is ever equal to the other (spec §6.1).
 """
 
 import asyncio

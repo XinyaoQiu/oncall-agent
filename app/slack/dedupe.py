@@ -1,10 +1,10 @@
 """Idempotency on `event_id`.
 
 Slack retries an envelope it did not see acked and redelivers on reconnect, and with ≥2
-`slackd` replicas (spec §4) duplicate delivery is expected rather than exceptional. Without
+`slackd` replicas (spec §7.1) duplicate delivery is expected rather than exceptional. Without
 a key one @-mention becomes two investigations, two progress messages and two answers.
 
-The claim is deliberately *releasable*. Spec §8.2's warning is about ordering: a claim taken
+The claim is deliberately *releasable*. Spec §9's warning is about ordering: a claim taken
 before the turn is durable — claim, then enqueue — survives a restart that the turn does
 not, and the surviving row blocks the redelivery that would have retried it. So a turn that
 dies before it records anything releases its claim, and only a turn that got as far as

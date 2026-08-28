@@ -5,7 +5,7 @@ this thread hang off an alert. That one is a fact and belongs in code. This one 
 "is it the cold start thing again?" and "what is server-feed?" are both questions typed into
 the same alert thread, and only their meaning separates them.
 
-Two things keep a semantic gate from becoming the failure §1.1 exists to prevent.
+Two things keep a semantic gate from becoming the failure spec §2.2 exists to prevent.
 
 The misroutes are not symmetric. Answering a definitional question with a full
 investigation is slow and noisy, but nothing is lost. Answering an investigation request
@@ -52,7 +52,7 @@ async def classify_intent(text: str, *, settings: Settings) -> tuple[Intent, str
     """Classify, biased toward investigating. Never raises."""
     stripped = (text or "").strip()
 
-    # A bare mention in an alert thread is the summons itself (tech-design §12).
+    # A bare mention in an alert thread is the summons itself (spec §3.1).
     if not stripped:
         return "investigate", "bare mention in an alert thread"
 

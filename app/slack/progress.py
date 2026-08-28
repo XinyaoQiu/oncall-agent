@@ -13,7 +13,7 @@ dropped is the last one, which is the answer.
 `chat.startStream`/`appendStream` (Tier 4) is the better path and is behind
 `slack_use_streaming`, default off: the API reference says `thread_ts` returns
 `invalid_thread_ts` outside whole-channel sessions while the SDK's own examples pass it
-(spec §12 risk 1). The adapter tries it and falls back to `chat.update` on that error, so
+(spec §10). The adapter tries it and falls back to `chat.update` on that error, so
 turning the flag on in a real workspace cannot leave a turn without a reply.
 """
 

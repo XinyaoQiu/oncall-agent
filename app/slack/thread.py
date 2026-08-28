@@ -1,8 +1,8 @@
 """Reading a Slack thread, and telling who wrote each message.
 
-Routing (spec §6) is decided from *who sent the root message*, not from what it says, so the
-classification below is load-bearing: get it wrong and an alert routes to chat, which is the
-recognition gate §2.3 exists to prevent.
+Routing (spec §5.1) is decided from *who sent the root message*, not from what it says, so
+the classification below is load-bearing: get it wrong and an alert routes to chat, which is
+the recognition gate §2.2 exists to prevent.
 
 **`bot_id` (`B…`) and `bot_user_id` (`U…`) are different identifiers.** They are both
 "the bot" in conversation and neither is ever equal to the other. The widely-copied
@@ -66,7 +66,7 @@ class ThreadMessage(BaseModel):
 
     @property
     def kind(self) -> str:
-        """`us` | `webhook_alert` | `bot_alert` | `human` | `unknown` (spec §8.4)."""
+        """`us` | `webhook_alert` | `bot_alert` | `human` | `unknown` (spec §6.1)."""
         if self.is_us:
             return "us"
         if self.subtype == "bot_message" and self.bot_id and not self.user:
@@ -144,8 +144,8 @@ def alert_message(
 def thread_digest(messages: list[ThreadMessage], limit: int = DIGEST_LIMIT) -> str:
     """The last `limit` messages as `author: text`, for the planner and the responder.
 
-    Evidence collection never sees this (spec §9 constraint 7); it is context for wording
-    and follow-ups, not an input to what gets measured.
+    `handlers` prepends this to the engineer's question, so it reaches the planner and
+    shapes what gets collected (spec §11) — it is thread context, not verified evidence.
     """
     lines = []
     for message in messages[-limit:]:

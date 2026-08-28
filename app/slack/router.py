@@ -1,9 +1,9 @@
-"""Routing — structural, never semantic (spec §6).
+"""Routing — structural, never semantic (spec §5).
 
 The question this module answers is *does this thread contain an alert message*, read from
 Slack metadata. It is deliberately not *do I recognise this alert*, and it is never *does
 this need investigating*: a classifier that can answer "this one doesn't" is the recognition
-gate spec §2.3 rejects, and it fails silently, because a skipped investigation looks exactly
+gate spec §2.2 rejects, and it fails silently, because a skipped investigation looks exactly
 like a thread nobody needed.
 
 So rules 2 and 3 below decide from `bot_id` / `app_id` / channel. An alert the registry has
