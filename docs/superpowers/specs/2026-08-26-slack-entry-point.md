@@ -155,10 +155,12 @@ Slack 是新增的适配层，不是对现有 Agent 的重写。
 
 规则 2–3 是主力。规则 5 只服务"工程师把告警文本手动粘进来"。
 
-`match_alert` 在 `app/slack/alerts.py`，告警名从 `aiops-docs/*.md` 里的 `**告警名**:`
-**自动提取**（`HighCPUUsage` / `SlowResponse` / `HighMemoryUsage` / `ServiceUnavailable` /
-`HighDiskUsage`），避免知识库和代码里各写一份、然后慢慢对不上。另外识别 `[FIRING]` /
-`[RESOLVED]` / `alertmanager` 这类标记。
+`match_alert` 在 `app/slack/alerts.py`，告警名读 `rec-knowledge/alerts.yaml` —— 一张**显式
+注册表**，几十行，遇到没登记的补一行。以前是从文档里正则抓 `**告警名**:`，那等于把告警清单
+藏在文档格式里，文档换个写法就静默失效；而现在文档归公司 wiki 管，我们没法要求它保持写法。
+
+ASCII 别名按词边界匹配（否则 `oom` 会命中 `zoom`、`502` 会命中 `15021`），中文退回子串。
+另外识别 `[FIRING]` / `[RESOLVED]` / `alertmanager` 这类标记。
 
 ### 5.2 `decide()` 的完整优先级
 
@@ -355,7 +357,7 @@ handlers 只认这一种。
 | `app/slack/dispatch.py` | 两个 service → 一条事件流 |
 | `app/slack/thread.py` | `fetch_thread` / 消息分类 / `alert_message` / `thread_digest` |
 | `app/slack/progress.py` | 进度合并写入 |
-| `app/slack/alerts.py` | 从 `aiops-docs` 提取告警名 |
+| `app/slack/alerts.py` | 读告警注册表 `rec-knowledge/alerts.yaml` |
 | `app/slack/dedupe.py` | `event_id` 幂等 |
 | `app/slack/mrkdwn.py` | Markdown → Slack mrkdwn |
 
@@ -392,7 +394,9 @@ handlers 只认这一种。
 ## 15. 尚未完成
 
 1. **顶层 @ 的告警提议**（§6.2）——当前顶层 @ 一律走对话
-2. **写回和打分的 Block Kit 按钮**——路由里 `writeup` / `rating` 的分支在，操作还没接
+2. **打分的 Block Kit 按钮**——`rating` 分支在路由里，操作还没接。`writeup` 已接：
+   起草案例 → 开 PR 到 `rec-knowledge`（`case_writeback_enabled` 默认关），
+   但触发它的按钮还没做，目前只能靠 `action_id=oncall_writeup` 的交互进来
 3. **持久化去重**——当前是内存实现，多副本需要共享存储
 4. **`chat.startStream` 实测**——开关在，默认关，要在真 workspace 里验
 5. **`agents.sessions.setStatus`**——Slack 新的 AI app 状态指示（旧的 `assistant.threads.*`

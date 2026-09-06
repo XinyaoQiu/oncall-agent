@@ -7,7 +7,7 @@
 SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
 HEALTH_CHECK_API = $(SERVER_URL)/health
-DOCS_DIR = aiops-docs
+DOCS_DIR = ../confluence
 MILVUS_CONTAINER = milvus-standalone
 
 # 颜色输出

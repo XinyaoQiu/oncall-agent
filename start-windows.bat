@@ -149,9 +149,9 @@ if errorlevel 1 (
     echo [成功] FastAPI 服务运行正常
     echo.
     
-    REM 调用 API 上传 aiops-docs 文档到向量数据库
+    REM 调用 API 上传 confluence 文档到向量数据库
     echo [8/8] 上传文档到向量数据库...
-    for %%f in (aiops-docs\*.md) do (
+    for %%f in (..\confluence\*.md) do (
         echo   上传: %%~nxf
         curl -s -X POST http://localhost:9900/api/upload -F "file=@%%f" >nul 2>&1
     )

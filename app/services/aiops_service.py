@@ -261,6 +261,15 @@ class AIOpsService:
             else:
                 yield event
 
+    def last_response(self, session_id: str) -> str:
+        """取回某个会话最后一次诊断的报告，供写回案例用。"""
+        try:
+            state = self.graph.get_state({"configurable": {"thread_id": session_id}})
+        except Exception as e:
+            logger.warning(f"[会话 {session_id}] 读取状态失败: {e}")
+            return ""
+        return (state.values or {}).get("response", "") if state else ""
+
     def _format_planner_event(self, state: Dict | None) -> Dict:
         """格式化 Planner 节点事件"""
         if not state:

@@ -438,9 +438,15 @@ def test_mrkdwn_does_not_eat_slack_bold():
 
 
 def fake_run_turn(response: str):
-    async def run_turn(turn, *, question, alert_text, thread_id):
+    async def run_turn(turn, *, question, alert_text, thread_id, confirmed_by=None):
         run_turn.states.append(
-            {"turn": turn, "question": question, "alert_text": alert_text, "thread_id": thread_id}
+            {
+                "turn": turn,
+                "question": question,
+                "alert_text": alert_text,
+                "thread_id": thread_id,
+                "confirmed_by": confirmed_by,
+            }
         )
         yield {"type": "status", "stage": "start", "message": "starting"}
         yield {"type": "step", "stage": "executor", "message": "queried ingress"}

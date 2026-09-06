@@ -12,6 +12,7 @@ from loguru import logger
 from app.config import config
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 from app.agent.mcp_client import get_mcp_client_with_retry
+from app.knowledge.context import datasource_context
 from .state import PlanExecuteState
 
 
@@ -57,9 +58,8 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
         # 创建工具节点（自动执行工具调用）
         tool_node = ToolNode(all_tools)
 
-        # 构建消息（只包含当前步骤，避免原始任务干扰）
-        messages = [
-            SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
+        # 只给数据源目录不给经验教训：executor 只做当前这一步，方法论是 planner/replanner 的事
+        system_prompt = """你是一个能力强大的助手，负责执行具体的任务步骤。
 
 你可以使用各种工具来完成任务。对于每个步骤：
 1. 理解步骤的目标
@@ -70,8 +70,19 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
 注意：
 - 如果工具调用失败，请说明失败原因
 - 不要编造数据，只返回实际获取的信息
+- 空结果代表「没有数据」，不代表「系统正常」，两者要分开说
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
+- 专注于当前步骤，不要考虑其他任务
+- 如果这一步查到了新的实体（服务名、组件、错误码、异常字符串），
+  用 search_incident_cases 查一次有没有相关的历史案例"""
+
+        datasources = datasource_context()
+        if datasources:
+            system_prompt = f"{system_prompt}\n\n{datasources}"
+
+        # 构建消息（只包含当前步骤，避免原始任务干扰）
+        messages = [
+            SystemMessage(content=system_prompt),
             HumanMessage(content=f"请执行以下任务: {task}")
         ]
 

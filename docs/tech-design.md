@@ -80,7 +80,7 @@ Web UI 可以把三个功能做成三个入口，因为用户自己会点。Slac
 它可能看错；查 `bot_id` 不会。
 
 而且这一条读的是**来源**不是**内容**——所以**一条从没被登记过的告警照样能触发完整排查**。
-关键词表（`app/slack/alerts.py`，从 `aiops-docs` 里的 `**告警名**:` 自动提取）是最后一条规则，
+关键词表（`app/slack/alerts.py`，读 `rec-knowledge/alerts.yaml` 这张显式注册表）是最后一条规则，
 只服务"工程师手动把告警文本粘进来"这一种情况。
 
 **②是真判断，没有结构性替代。** "是不是又是冷启动？"和"data-sync-service 是干嘛的？"都是打在告警
@@ -139,17 +139,16 @@ Replanner  三选一：continue │ replan │ respond
 
 这是个位置选择，值得说明。
 
-RAG 检索发生在**制定计划之前**，检索到的手册作为"相关经验"进 planner 的 prompt。所以那 5 篇
-`aiops-docs` 实际上是**计划模板**——它们的"排查步骤"章节直接写了该调哪个工具、传什么参数：
+RAG 检索发生在**制定计划之前**，检索到的手册作为"相关经验"进 planner 的 prompt。放在最后当
+参考，模型只能拿它验证结论；放在最前面，它能直接决定查什么。
 
-```markdown
-### 步骤2: 查询系统日志
-**工具**: `query_logs`
-**参数要求**: 地域 ap-guangzhou / 日志主题 system-metrics / 时间范围 最近30分钟
-```
+但**手册里不该写工具名和参数**。「用 `query_logs` 查 `ap-guangzhou` 的 `system-metrics` 主题」
+这种写法，工具一改名、日志系统一迁移就全错，而且没人会去改几十篇文档——何况手册归公司 wiki
+管，我们没资格要求它保持某种写法。
 
-放在最后当参考，模型只能拿它验证结论；放在最前面，它能直接决定查什么。**团队经验因此变成
-可执行的东西，而不是读物。**
+所以拆成两层：**手册只写领域知识**（该看什么指标、按什么维度拆、有什么坑），
+**工具和数据源的映射单独维护**在 `rec-knowledge/datasources/`，作为常驻上下文进 planner 和
+executor 的提示词，不参与检索。通则靠语义命中去召回，就一定会在某次漏掉，而漏掉不报错。
 
 ### 3.3 循环终止靠代码，不靠提示词
 
@@ -295,7 +294,15 @@ Slack 会重投未 ack 的事件，重连时也会重投；跑多个 slackd 副�
 
 ## 6. 知识库
 
-Milvus 向量库，`aiops-docs/` 下的 markdown 是初始语料。
+两套知识，存储和检索方式都不同：
+
+| | 内容 | 存放 | 检索 |
+|---|---|---|---|
+| **公司 wiki** | 告警处置手册、架构、部署、tech design | `confluence/`（外部系统的镜像，只读） | Milvus 向量检索 |
+| **agent 自己的知识** | datasources / cases / lessons | `rec-knowledge/`（git 仓，agent 写、人 merge） | grep + 常驻注入 |
+
+`confluence/` 下的 markdown 是向量库的语料（`make upload`）。`rec-knowledge/` 不进向量库：
+语料小，而且案例是 agent 自己按同一套词汇写的，两端受控，grep 比向量稳。
 
 **切分和 TopK 是一组权衡，不是拍脑袋的常数：**
 

@@ -13,6 +13,7 @@ from loguru import logger
 from app.config import config
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
 from app.agent.mcp_client import get_mcp_client_with_retry
+from app.knowledge.context import resident_context
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -38,6 +39,8 @@ planner_prompt = ChatPromptTemplate.from_messages(
 
                 注意：你的职责是制定计划，实际的工具调用由 Executor 负责执行。
 
+                {resident_context}
+
                 {experience_context}
 
                 对于给定的任务，请创建一个简单的、逐步的计划来完成它。计划应该：
@@ -45,7 +48,9 @@ planner_prompt = ChatPromptTemplate.from_messages(
                 - 每个步骤应该明确使用哪些工具(如果需要工具的话)来获取信息, 最好能同时提供工具执行所需要的参数
                 - 步骤之间应该有清晰的依赖关系
                 - 步骤描述要具体、可操作
-                - **如果有相关经验文档，请参考其中的方法和步骤制定计划**
+                - **数据源目录和经验教训优先于通用文档**：它们记录的是本系统实测的口径，
+                  和通用建议冲突时以它们为准
+                - **如果检索到的资料互相矛盾，在计划里指出矛盾，不要静默采信其中一方**
 
                 示例输入："分析当前系统的性能问题"
                 示例输出（假设有对应工具）：
@@ -131,6 +136,7 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
         plan_result = await planner_chain.ainvoke({
             "messages": [("user", input_text)],
             "tools_description": tools_description,
+            "resident_context": resident_context(),
             "experience_context": experience_context
         })
 

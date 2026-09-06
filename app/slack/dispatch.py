@@ -14,6 +14,9 @@ from typing import Any
 
 from loguru import logger
 
+from app.knowledge.cases import cases_for_alert, render
+from app.slack.alerts import alert_services, match_alert
+
 TRIAGE_TASK = """请排查下面这条生产告警，并给出诊断报告。
 
 {alert}
@@ -25,9 +28,32 @@ TRIAGE_TASK = """请排查下面这条生产告警，并给出诊断报告。
 - 每条结论都要指出它依据的是哪一步查到的什么"""
 
 
+def _history(alert_text: str) -> str:
+    """告警名和服务名是已知事实，不需要判断，所以历史案例自动注入而不是等 agent 想起来查。
+    模糊的那一半（「这个症状像什么」）留给 search_incident_cases 工具。"""
+    name = match_alert(alert_text)
+    if not name:
+        return ""
+    try:
+        hits = cases_for_alert(name, alert_services(name))
+    except Exception as exc:
+        logger.warning(f"历史案例检索失败: {exc}")
+        return ""
+    if not hits:
+        return ""
+    logger.info(f"告警 {name!r} 命中 {len(hits)} 篇历史案例")
+    body = render(hits, "## 这条告警的历史案例")
+    return (
+        f"\n{body}\n\n"
+        "以上是本系统过去的诊断结论，属于线索不是结论——本次仍需重新取证；"
+        "如果这次的证据和它们冲突，以本次证据为准并说明冲突。\n"
+    )
+
+
 def _triage_input(alert_text: str, question: str) -> str:
     asked = f"\n工程师另外问了：{question}\n" if question else "\n"
-    return TRIAGE_TASK.format(alert=alert_text or "(thread 里没有取到告警原文)", question=asked)
+    task = TRIAGE_TASK.format(alert=alert_text or "(thread 里没有取到告警原文)", question=asked)
+    return task + _history(alert_text)
 
 
 async def run_turn(
@@ -36,10 +62,14 @@ async def run_turn(
     question: str,
     alert_text: str,
     thread_id: str,
+    confirmed_by: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """按 turn 分派，产出 {type, message?, response?} 事件。"""
     if turn == "chat":
         async for out in _chat(question, thread_id):
+            yield out
+    elif turn == "writeup":
+        async for out in _writeup(alert_text, thread_id, confirmed_by):
             yield out
     else:
         async for out in _triage(question, alert_text, thread_id):
@@ -85,3 +115,32 @@ async def _chat(question: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
         return
 
     yield {"type": "complete", "response": "".join(chunks).strip()}
+
+
+async def _writeup(
+    alert_text: str, thread_id: str, confirmed_by: str | None
+) -> AsyncIterator[dict[str, Any]]:
+    """把这一轮排查固化成案例。只由显式操作触发，产出是 PR 不是既成事实。"""
+    from app.knowledge.writeback import draft_case, open_case_pr
+    from app.services.aiops_service import aiops_service
+
+    report = aiops_service.last_response(thread_id)
+    if not report:
+        yield {"type": "complete", "response": "这个 thread 里还没有排查结论，没有可以记录的东西。"}
+        return
+
+    yield {"type": "progress", "message": "起草案例"}
+    name = match_alert(alert_text) or ""
+    draft = await draft_case(alert=name, services=alert_services(name), report=report)
+    if draft is None:
+        yield {"type": "error", "message": "案例起草失败"}
+        return
+
+    yield {"type": "progress", "message": f"提交 {draft.filename}"}
+    url = open_case_pr(draft, confirmed_by=confirmed_by)
+    if not url:
+        yield {"type": "complete", "response": f"案例已起草（{draft.filename}），但没能开 PR，请查日志。"}
+        return
+
+    verb = "更新" if draft.replaces_existing else "新增"
+    yield {"type": "complete", "response": f"已{verb} `{draft.filename}` 并开了 PR：{url}"}

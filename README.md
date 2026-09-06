@@ -176,7 +176,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 9900
 # 9. 上传文档到向量库（新开一个 PowerShell 窗口）
 # 等待服务启动完成后执行
 timeout /t 5
-python -c "import requests, os, time; [requests.post('http://localhost:9900/api/upload', files={'file': open(f'aiops-docs/{f}', 'rb')}) or time.sleep(1) for f in os.listdir('aiops-docs') if f.endswith('.md')]"
+python -c "import requests, os, time; [requests.post('http://localhost:9900/api/upload', files={'file': open(f'../confluence/{f}', 'rb')}) or time.sleep(1) for f in os.listdir('../confluence') if f.endswith('.md')]"
 ```
 
 **Windows 一键启动脚本**（推荐）
@@ -269,9 +269,15 @@ super_biz_agent_py/
 │   │   ├── dispatch.py                     # 把运维 Agent 和对话 Agent 收敛成一条事件流
 │   │   ├── thread.py                       # 读 thread、区分告警消息和人类消息
 │   │   ├── progress.py                     # 进度合并写入，避开 chat.update 限流
-│   │   ├── alerts.py                       # 从 aiops-docs 提取的告警名，路由最后一条规则用
+│   │   ├── alerts.py                       # 读告警注册表，路由最后一条规则用
 │   │   ├── dedupe.py                       # event_id 幂等，一次 @ 一次排查
 │   │   └── mrkdwn.py                       # Markdown → Slack mrkdwn
+│   ├── knowledge/                          # 知识层：两个库在仓库外，生命周期和代码无关
+│   │   ├── paths.py                        # confluence / rec-knowledge 的位置
+│   │   ├── registry.py                     # 告警名注册表（rec-knowledge/alerts.yaml）
+│   │   ├── context.py                      # datasources + lessons，常驻注入不参与检索
+│   │   ├── cases.py                        # 历史案例：精确自动注入 + grep 工具
+│   │   └── writeback.py                    # 起草案例并开 PR，绝不推 main
 │   ├── models/                             # 数据模型层
 │   │   ├── __init__.py
 │   │   ├── aiops.py                        # AIOps 模型
@@ -297,7 +303,6 @@ super_biz_agent_py/
 │   ├── cls_server.py                       # CLS 日志查询服务
 │   ├── monitor_server.py                   # 监控数据服务
 │   └── README.md                           # MCP 服务说明
-├── aiops-docs/                             # 运维知识库（Markdown 文档）
 ├── logs/                                   # 日志目录（Loguru 自动创建）
 │   └── app_YYYY-MM-DD.log                  # 按天轮转的日志文件
 ├── uploads/                                # 上传文件临时目录

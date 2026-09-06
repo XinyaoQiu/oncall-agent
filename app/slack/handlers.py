@@ -135,6 +135,8 @@ async def run_slack_turn(
             question=asked,
             alert_text=alert.text if alert else question,
             thread_id=thread_id,
+            # 显式点了「记录」的人就是确认人；没有这个信号的案例 PR 会被标成未经确认。
+            confirmed_by=str(event.get("user") or "") or None,
         ):
             kind = event_out.get("type")
             if kind == "error":

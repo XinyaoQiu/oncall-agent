@@ -53,6 +53,19 @@ class Settings(BaseSettings):
     prometheus_base_url: str = "http://127.0.0.1:9090"
     prometheus_request_timeout: float = 10.0
 
+    # 知识库路径（相对仓库根目录，或绝对路径）
+    # confluence = 公司 wiki 的镜像，只读、进向量库；rec-knowledge = 本 agent 自己的知识，走 grep
+    confluence_dir: str = "../confluence"
+    rec_knowledge_dir: str = "../rec-knowledge"
+
+    # datasources/ 和 lessons/ 常驻上下文，不参与检索；超出上限会截断并告警
+    resident_context_max_chars: int = 40000
+    case_search_max_hits: int = 5
+
+    # 回写：起草 case 并开 PR，绝不直接推 main
+    case_writeback_enabled: bool = False
+    case_writeback_branch_prefix: str = "case/"
+
     # Slack 配置
     # 路由读的是「消息来源」而不是「消息内容」：把发告警的 bot / app / 频道列在这里，
     # 没有被登记过的告警也能拿到完整排查，而不是靠关键词认出来才排查。
